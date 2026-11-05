@@ -479,7 +479,7 @@ def performance_widgets(model):
                 ),
                 text=f"DPI stage {n + 1} colour",
                 stage=n,
-                hint="Enter edits the colour. The vendor app shows stage pairs swapped",
+                hint="Enter edits. The app shows stage pairs swapped",
             )
         )
 
@@ -598,7 +598,7 @@ def backlight_widgets():
                     ),
                 )
             ),
-            hint=UNVERIFIED + ", n/a for Button Response and LED Off",
+            hint="range unverified, n/a for Button Response and LED Off",
         ),
         Widget(
             "toggle",
@@ -640,11 +640,9 @@ def read_device(progress=None):
 
 
 def wants_unicode():
-    """Return True when the terminal can show the box and block characters."""
-    return (
-        locale.getpreferredencoding(False).lower().replace("-", "") == "utf8"
-        and os.environ.get("TERM") != "linux"
-    )
+    """Return True when the C library locale is UTF-8. Curses can then draw the box and block characters."""
+    codeset = locale.nl_langinfo(locale.CODESET).lower().replace("-", "")
+    return codeset == "utf8" and os.environ.get("TERM") != "linux"
 
 
 class Screen:
@@ -711,7 +709,7 @@ class Screen:
         if 0 <= y < h and 0 <= x < w:
             try:
                 self.scr.addstr(y, x, text[: max(0, w - x - 1)], attr)
-            except curses.error:
+            except (curses.error, UnicodeEncodeError):
                 pass
 
     def line(self, y, x, n):
@@ -991,7 +989,7 @@ class Screen:
         self.popup("Help", KEYS + ["", "Commands (press : first)", *COMMANDS], None)
 
     def command_line(self):
-        """Read a command on the status row. Return the text, or None if it is cancelled."""
+        """Read a command on the status row. Return the text. Return None if it is cancelled."""
         text = ""
         while True:
             self.put(22, 0, " " * 79)

@@ -329,3 +329,10 @@ def test_a_command_that_breaks_an_invariant_is_refused_by_the_model(model):
 def test_the_footer_and_the_help_text_fit_the_canvas():
     assert len(tui.FOOTER) <= 78
     assert all(len(line) <= 70 for line in [*tui.KEYS, *tui.COMMANDS])
+
+
+def test_every_hint_fits_the_border_title_with_the_colour_prefix(tabs):
+    for widgets in tabs.values():
+        for w in widgets:
+            prefix = len("R 15 G 15 B 15  ") if w.kind == "swatch" else 0
+            assert len(w.hint) + prefix <= 68, (w.key, w.hint)
