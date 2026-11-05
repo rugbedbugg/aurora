@@ -1,0 +1,124 @@
+EvoFox Blaze (USB 30fa:1440) config protocol
+
+The protocol was recovered from the vendor Windows app. Its USB traffic was captured and its
+config file was patched one key at a time. Each patch gave one diff of the image it sends.
+The decoded layout was then read from and written to a real mouse with this tool.
+
+Transport
+  The config channel is HID feature report ID 7, 8 bytes, on USB interface 1. That is the
+  keyboard interface, usage page 0xFF01. Find its hidraw node through sysfs.
+  Host to device is SET_REPORT: bmRequestType 0x21, bRequest 9, wValue 0x0307, wIndex 1.
+  Device to host is GET_REPORT: bmRequestType 0xa1, bRequest 1, same wValue and wIndex.
+  Linux reaches both through the HIDIOCSFEATURE and HIDIOCGFEATURE ioctls on the hidraw node.
+
+Status reply
+  A GET_REPORT with no command before it returns the live status:
+    07 <last read byte> <flag> 09 <flag> 00 <b6> <b7>
+  Bytes 3 and 5 held in every state seen. Bytes 2 and 4 are state flags. They read 62 and 10
+  until a power cycle and 64 and 50 after it. Do not depend on them.
+  b6 = 03 | (polling bits of image byte 0x01e << 5) | (profile << 2).
+    Examples: 03 is 1000 Hz, 23 is 500 Hz, 27 is 500 Hz on profile 1, 2f is 500 Hz on profile 3.
+  b7 is normally 6b. Its high nibble is the live LED effect id. 6 is Neon.
+
+Read command
+  07 18 05 <off> <addr_lo> <addr_hi> 00 07
+  Then send GET_REPORT. Reply byte 1 is the config byte at addr + off.
+  Close every 8 byte page with 07 18 00 00 00 00 00 00. Without the close the device keeps
+  returning the first page it was asked for.
+  The first read of a session is stale. So is the first read after a write burst or a bare
+  status GET. Discard one page before real reads.
+  A full read of 0x000..0x2cf takes about 7 seconds.
+
+Write sequence
+  07 18 03 <off> <addr_lo> <addr_hi> <data> <last>   write one byte at (addr_hi:addr_lo) + off
+  07 18 09 00 <addr_lo> <addr_hi> 00 00              commit the page
+  07 18 00 <...>                                     end the page
+  07 18 10 00 00 00 00 00                            commit everything
+  <last> is the last offset used in that page. A full page uses 07.
+  A write is not applied until the 09 commit. Staged bytes do not show in later reads.
+  The vendor app sends the whole 0x2D0 byte image, 867 reports in about 3 seconds, on every
+  start and every Apply. Reports are spaced about 3 ms apart.
+  The app never writes 0x000, 0x002..0x007, 0x07b..0x07e or 0x080..0x097. Those hold a header
+  and firmware data. Leave them alone.
+  Addresses 0x06e and 0x06f are written twice per burst. The last write wins.
+  The app resends the same burst for any change. blazectl sends one burst per command.
+
+Image layout
+  0x001  03 | (profile << 5), profile 0..3. Bits 5 and 6 are the profile in the page 0 header.
+  0x008..0x010  button bytes. Buttons 1..8 are at 0x08 0x0a 0x09 0x0c 0x0b 0x0f 0x0d 0x10.
+         0x0e is unused. A byte is a function code with the button's LED reaction type in bits
+         6 and 7. Example: 21 becomes 61 for reaction type 1.
+  0x013  DPI range flags, bit n set when stage n uses indices 14..22
+  0x015..0x017  DPI stage nibbles. 0x015 holds stage 1 in the high nibble and stage 2 in the
+         low nibble. 0x016 holds stages 3 and 4. 0x017 holds stages 5 and 6.
+  0x018  active DPI stage, 18 is stage 1, 19 is stage 2
+  0x019  DPI stage enable bits, bit n for stage n+1, 3f is all six
+  0x01a  fire time in ms, little-endian u16 with 0x01b, up to 300
+  0x01c  high nibble 8 | (LED effect & 7), low nibble LED cycle time
+  0x01d  colour cycle enable bits, bit 7 is always set
+  0x01e  polling, see below
+  0x020..0x031  six stage colours, R G B each, 18 bytes. The low nibble is the DPI stage colour.
+         The high nibble is the LED user colour. Both share the bytes.
+  0x033  bit 7 set for LED effects 8 and above
+  0x03a  bit 6 LED symmetry, bit 4 LED direction
+  0x03e  high nibble LED user colour 6 red, low nibble green
+  0x03f  high nibble brightness, low nibble LED user colour 6 blue
+  0x044, 0x050, 0x060  button tables of profiles 1, 2 and 3
+  0x076  bit 6 set, bit 7 light mode, low bits profile
+
+Polling
+  Image byte 0x01e is a thermometer code: 00 is 1000 Hz, 01 is 500 Hz, 03 is 250 Hz,
+  07 is 125 Hz.
+
+DPI
+  Each stage has an index 0..22. The index maps to a nibble and a range flag.
+    index 0..13   nibble 1 2 3 4 5 6 7 8 9 a c d e f (b is skipped), flag 0
+    index 14..22  nibble 0 1 2 3 4 5 6 7 8, flag 1
+  Values read from the vendor app: index 2 is 600, 5 is 1200, 8 is 1800, 10 is 2400, 13 is
+  4800, 16 is 7200 and 22 is 12800. The other indices have no known value.
+
+Button functions
+  Dropdown index and wire code in hex:
+    0 none 20        1 left 21        2 middle 22      3 right 23      4 backward 24
+    5 forward 25     6 dpi-loop 26    12 show-desktop 27   13 double-click 28
+    14 rapid-fire 29   15 led-loop 35   16 dpi-up 2b     17 dpi-down 2c   18 fn 34
+    19 profile-office 37   20 profile-game-1 38   21 profile-game-2 39
+  Indices 7..11 are categories (extend, media, macro, shortcut, profile selection) with their
+  payload in other fields. Their wire codes are not decoded.
+
+LED effects
+  Dropdown order, effect = position - 1: dpi-breathing, cycle-breathing, light-on,
+  flowing-water, mono-water, comet-streak, neon, ambilight, flicker, star-trek, ripple,
+  enraptured, button-response, led-off.
+  Effects 0..11 use the nibble and flag above. Effects 12 and 13 write 0x01c = 99 and 87, seen
+  with a cycle time of 1. Values 14 and 15 are not in the dropdown.
+
+Live lighting frames
+  Two more commands change the lighting without touching the config. They only live in RAM.
+  After a power cycle the stored effect returns. A full burst clears them too.
+    07 13 <b2> <b3> <b4> <b5> <b6> <b7>
+      b2 = A + 0x80, b3 = (B << 7) + (C << 4) + (K << 3) + (D & 7) in the low byte,
+      b4 = (M << 6) + N + ((P << 4) & 0x30), b5 = Q & 7,
+      b6 = ((C >> 3) << 7) + ((L >> 8) & 3), b7 = L & 0xff.
+      C is the effect id. The vendor app sends L = 0x3fff, which is 1023 after masking.
+    07 14 <(slot << 5) + G> <(R << 4) + B> ...   sets a colour, channel order assumed
+  Frame 07 13 ff a2 0b 04 03 ff gives status b7 = 2b (effect 2, light-on).
+  Frame 07 13 ff 52 0b 03 83 ff gives status b7 = db (effect 13, led-off).
+  The vendor app's music-lighting switches these frames with the audio level. The frames sent
+  while audio plays have not been captured. The effect of Q and N on the lighting is not
+  verified.
+
+Host-side settings
+  Pointer sensitivity and scroll speed are applied by the vendor app through the operating
+  system. They move no device bytes. On Linux they belong in the compositor config.
+
+Verified on a real mouse
+  Reads of the whole image. A replay of a captured burst. Polling 500 to 1000 and back.
+  DPI stage 6 changes. A profile switch to Game I and back. A power cycle after a live
+  lighting frame.
+
+Not decoded
+  Keyboard, media, shortcut and macro button payloads. LED_REACT_TYPE meaning beyond 0 and 1.
+  Brightness and cycle time ranges beyond small values. The values of most DPI indices.
+  Macros. Which DPI stage each colour belongs to on the mouse: the vendor app screen shows the
+  colours of stage pairs 1 and 2, 3 and 4, 5 and 6 swapped relative to the byte order.
