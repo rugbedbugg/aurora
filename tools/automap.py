@@ -14,11 +14,12 @@ sys.path.insert(0, HERE)
 import decode  # noqa: E402
 import diffimg  # noqa: E402
 
-SCRATCH = os.environ["AURORA_SCRATCH"]
+ROOT = os.path.join(HERE, "..")
+WORK = os.environ.get("AURORA_WORK", os.path.join(ROOT, "research"))
+SCRATCH = os.environ.get("AURORA_SCRATCH", os.path.join(WORK, "runtime"))
 APP = f"{SCRATCH}/evofox-extracted/app"
 INI = f"{APP}/skins/config/config.ini"
 ENV = dict(os.environ, WINEPREFIX=f"{SCRATCH}/wineprefix", WINEDEBUG="-all")
-WORK = os.environ.get("AURORA_WORK", os.path.expanduser("~/evofox-blaze"))
 STATE = os.path.join(WORK, "app-state")
 SAVED_INI = os.path.join(STATE, "config.ini.current")
 REF_IMAGE = os.path.join(STATE, "reference-image.json")

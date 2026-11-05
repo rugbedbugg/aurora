@@ -1,6 +1,7 @@
 """Rebuild the burst template and the golden burst from the captured bursts. Needs tshark.
 
-Set AURORA_WORK to the directory that holds captures/01-baseline.pcapng and captures/02-changes.pcapng.
+AURORA_WORK names the directory that holds captures/01-baseline.pcapng and
+captures/02-changes.pcapng. It defaults to the untracked research folder.
 Run it with the tools directory on the path, for example: python3 tools/make_template.py
 """
 
@@ -20,7 +21,7 @@ import diffimg  # noqa: E402
 
 from aurora import burst  # noqa: E402
 
-WORK = os.environ.get("AURORA_WORK", os.path.expanduser("~/evofox-blaze"))
+WORK = os.environ.get("AURORA_WORK", os.path.join(ROOT, "research"))
 
 
 def capture_burst(pcap, index, addr="8"):
