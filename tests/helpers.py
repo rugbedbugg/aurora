@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from blazectl import burst, image
+from aurora import burst, image
 
 DATA = Path(__file__).parent / "data"
 
@@ -58,7 +58,7 @@ class FakeDevice:
 
 
 def install_fake(monkeypatch, mem, fail_first=None):
-    """Make blazectl open FakeDevice objects that share one memory. Return the list of opened devices."""
+    """Make aurora open FakeDevice objects that share one memory. Return the list of opened devices."""
     opened = []
 
     def factory():

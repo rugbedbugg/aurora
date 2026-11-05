@@ -14,19 +14,19 @@
     in
     {
       packages = forAll (pkgs: rec {
-        blazectl = pkgs.callPackage ./nix/package.nix { };
-        default = blazectl;
+        aurora = pkgs.callPackage ./nix/package.nix { };
+        default = aurora;
       });
 
       overlays.default = final: _prev: {
-        blazectl = final.callPackage ./nix/package.nix { };
+        aurora = final.callPackage ./nix/package.nix { };
       };
 
       nixosModules.default = ./nix/module.nix;
 
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
-          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.blazectl ];
+          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.aurora ];
           packages = [
             pkgs.python3Packages.pytest
             pkgs.ruff

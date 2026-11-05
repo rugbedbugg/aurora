@@ -1,4 +1,4 @@
-from blazectl import device
+from aurora import device
 
 
 def test_ioctl_numbers_match_the_kernel_values_for_eight_byte_reports():

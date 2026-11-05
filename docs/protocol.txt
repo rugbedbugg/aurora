@@ -41,7 +41,7 @@ Write sequence
   The app never writes 0x000, 0x002..0x007, 0x07b..0x07e or 0x080..0x097. Those hold a header
   and firmware data. Leave them alone.
   Addresses 0x06e and 0x06f are written twice per burst. The last write wins.
-  The app resends the same burst for any change. blazectl sends one burst per command.
+  The app resends the same burst for any change. Aurora sends one burst per command.
 
 Image layout
   0x001  03 | (profile << 5), profile 0..3. Bits 5 and 6 are the profile in the page 0 header.

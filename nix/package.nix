@@ -4,7 +4,7 @@
 }:
 
 python3Packages.buildPythonApplication {
-  pname = "blazectl";
+  pname = "aurora";
   version = "0.1.0";
   src = lib.cleanSource ../.;
   pyproject = true;
@@ -14,16 +14,16 @@ python3Packages.buildPythonApplication {
   nativeCheckInputs = [ python3Packages.pytestCheckHook ];
 
   postInstall = ''
-    install -Dm644 udev/70-blazectl.rules $out/lib/udev/rules.d/70-blazectl.rules
+    install -Dm644 udev/70-aurora.rules $out/lib/udev/rules.d/70-aurora.rules
   '';
 
-  pythonImportsCheck = [ "blazectl" ];
+  pythonImportsCheck = [ "aurora" ];
 
   meta = {
     description = "Configure the EvoFox Blaze mouse from Linux";
-    homepage = "https://github.com/rugbedbugg/blazectl";
+    homepage = "https://github.com/rugbedbugg/aurora";
     license = lib.licenses.wtfpl;
-    mainProgram = "blazectl";
+    mainProgram = "aurora";
     platforms = lib.platforms.linux;
   };
 }

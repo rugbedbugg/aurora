@@ -5,16 +5,16 @@
   ...
 }:
 let
-  cfg = config.programs.blazectl;
+  cfg = config.programs.aurora;
 in
 {
-  options.programs.blazectl = {
-    enable = lib.mkEnableOption "blazectl, a configuration tool for the EvoFox Blaze mouse";
+  options.programs.aurora = {
+    enable = lib.mkEnableOption "Aurora, a configuration tool for the EvoFox Blaze mouse";
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs.callPackage ./package.nix { };
-      defaultText = lib.literalExpression "blazectl";
-      description = "The blazectl package to use.";
+      defaultText = lib.literalExpression "aurora";
+      description = "The Aurora package to use.";
     };
   };
 

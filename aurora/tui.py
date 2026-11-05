@@ -1,4 +1,4 @@
-"""A curses front end for blazectl that uses only the terminal's default colours."""
+"""A curses front end for Aurora that uses only the terminal's default colours."""
 
 import contextlib
 import curses
@@ -6,7 +6,7 @@ import io
 import sys
 from collections import OrderedDict
 
-from blazectl import burst, cli, device, image
+from aurora import burst, cli, device, image
 
 POLLING = [125, 250, 500, 1000]
 KNOWN_DPI = sorted(image.DPI_LABEL)

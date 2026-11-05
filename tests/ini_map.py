@@ -1,6 +1,6 @@
 """Map the vendor app's config.ini keys onto the image to check the encoder against recorded probes."""
 
-from blazectl import image
+from aurora import image
 
 # Keys that move no device bytes. The vendor app applies them through the OS.
 HOST_SIDE = {"DPI_SPEED", "WHEEL_SPEED"}

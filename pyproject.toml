@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "blazectl"
+name = "aurora"
 dynamic = ["version"]
 description = "Configure the EvoFox Blaze mouse from Linux"
 license = { file = "LICENSE" }
@@ -17,17 +17,17 @@ classifiers = [
 ]
 
 [project.scripts]
-blazectl = "blazectl.cli:main"
-blazetui = "blazectl.tui:main"
+aurora = "aurora.cli:main"
+aurora-tui = "aurora.tui:main"
 
 [tool.setuptools.packages.find]
-include = ["blazectl*"]
+include = ["aurora*"]
 
 [tool.setuptools.package-data]
-blazectl = ["data/*.json"]
+aurora = ["data/*.json"]
 
 [tool.setuptools.dynamic]
-version = { attr = "blazectl.__version__" }
+version = { attr = "aurora.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

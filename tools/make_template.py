@@ -1,6 +1,6 @@
 """Rebuild the burst template and the golden burst from the captured bursts. Needs tshark.
 
-Set BLAZE_WORK to the directory that holds captures/01-baseline.pcapng and captures/02-changes.pcapng.
+Set AURORA_WORK to the directory that holds captures/01-baseline.pcapng and captures/02-changes.pcapng.
 Run it with the tools directory on the path, for example: python3 tools/make_template.py
 """
 
@@ -18,9 +18,9 @@ sys.path.insert(0, ROOT)
 import decode  # noqa: E402
 import diffimg  # noqa: E402
 
-from blazectl import burst  # noqa: E402
+from aurora import burst  # noqa: E402
 
-WORK = os.environ.get("BLAZE_WORK", os.path.expanduser("~/evofox-blaze"))
+WORK = os.environ.get("AURORA_WORK", os.path.expanduser("~/evofox-blaze"))
 
 
 def capture_burst(pcap, index, addr="8"):
@@ -68,7 +68,7 @@ def main():
     expected = [None if kind == "GET" else bytes.fromhex(data) for _, kind, data in final]
     sample = {
         int(k): v
-        for k, v in json.load(open(os.path.join(ROOT, "blazectl", "data", "sample-image.json"))).items()
+        for k, v in json.load(open(os.path.join(ROOT, "aurora", "data", "sample-image.json"))).items()
     }
     ok_final = equivalent(template, [r for _, r in burst.build(template, sample)], expected)
     expected_startup = [None if kind == "GET" else bytes.fromhex(data) for _, kind, data in startup]
@@ -77,7 +77,7 @@ def main():
     print("final burst reproduced:", ok_final, "| startup burst reproduced:", ok_startup)
     if not (ok_final and ok_startup):
         raise SystemExit("offline check failed, nothing written")
-    with open(os.path.join(ROOT, "blazectl", "data", "apply-template.json"), "w") as f:
+    with open(os.path.join(ROOT, "aurora", "data", "apply-template.json"), "w") as f:
         json.dump(template, f)
     with open(os.path.join(ROOT, "tests", "data", "final-burst.json"), "w") as f:
         json.dump([None if r is None else r.hex() for r in expected], f)

@@ -11,7 +11,7 @@ import signal
 import time
 from importlib import resources
 
-from blazectl import device, image
+from aurora import device, image
 
 MIN_GAP = 0.003
 IMAGE_SIZE = 0x2D0
@@ -19,12 +19,12 @@ MAGIC_PAGE0 = bytes([0x5A, 0x03, 0xA5, 0x40, 0x14, 0xFA, 0x30, 0x10])
 
 
 def load_template():
-    return json.loads(resources.files("blazectl").joinpath("data/apply-template.json").read_text())
+    return json.loads(resources.files("aurora").joinpath("data/apply-template.json").read_text())
 
 
 def state_dir():
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
-    return os.path.join(base, "blazectl")
+    return os.path.join(base, "aurora")
 
 
 def last_good_path():
@@ -112,7 +112,7 @@ def recover(template, before):
         finally:
             dev.close()
     except (OSError, device.DeviceError) as exc:
-        print(f"recovery failed: {exc}. Replug the mouse and run 'blazectl rewrite --force'.")
+        print(f"recovery failed: {exc}. Replug the mouse and run 'aurora rewrite --force'.")
         return False
     print("restored the previous settings" if ok else "the mouse does not match the previous settings")
     return ok

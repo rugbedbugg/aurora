@@ -1,7 +1,7 @@
 import pytest
 from helpers import full_image, install_fake
 
-from blazectl import cli, image
+from aurora import cli, image
 
 
 @pytest.fixture

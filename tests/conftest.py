@@ -1,6 +1,6 @@
 import pytest
 
-from blazectl import burst, device
+from aurora import burst, device
 
 
 @pytest.fixture(autouse=True)

@@ -4,7 +4,7 @@ import pytest
 from helpers import DATA, load_json
 from ini_map import apply_ini_key, get_ini_view
 
-from blazectl import image
+from aurora import image
 
 REFUSED_PROBES = {
     "ShareData.DPI_SET3=23",

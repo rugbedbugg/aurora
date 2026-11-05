@@ -47,7 +47,7 @@ class Unmapped(Exception):
 
 def load_sample():
     """Return the bundled sample image, a real read from a mouse."""
-    text = resources.files("blazectl").joinpath("data/sample-image.json").read_text()
+    text = resources.files("aurora").joinpath("data/sample-image.json").read_text()
     return {int(k): v for k, v in json.loads(text).items()}
 
 

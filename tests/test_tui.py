@@ -1,4 +1,4 @@
-from blazectl import image, tui
+from aurora import image, tui
 
 
 def sample():

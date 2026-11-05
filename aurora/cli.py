@@ -1,9 +1,9 @@
-"""The blazectl command: read and change the mouse's settings."""
+"""The aurora command: read and change the mouse's settings."""
 
 import argparse
 import sys
 
-from blazectl import burst, device, image
+from aurora import burst, device, image
 
 EFFECTS = [
     "dpi-breathing",
@@ -55,7 +55,7 @@ Only the DPI values read from the vendor app are accepted by value. Use idx: for
 dpi-colour.N follows the config byte order. The vendor app screen shows stage pairs (1,2), (3,4)
 and (5,6) swapped, so check the real colours on the mouse.
 A set sends one burst. If the burst fails midway the tool replays the previous settings.
-After a change made in another tool, run 'blazectl rebaseline' to accept the mouse as it is."""
+After a change made in another tool, run 'aurora rebaseline' to accept the mouse as it is."""
 
 
 def parse_bool(text):
@@ -216,7 +216,7 @@ def cmd_rebaseline(args):
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        prog="blazectl",
+        prog="aurora",
         description="Read and change EvoFox Blaze settings.",
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,

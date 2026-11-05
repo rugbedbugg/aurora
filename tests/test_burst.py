@@ -1,7 +1,7 @@
 import pytest
 from helpers import FakeDevice, full_image, install_fake, load_json
 
-from blazectl import burst, image
+from aurora import burst, image
 
 template = burst.load_template()
 
@@ -58,11 +58,11 @@ def test_drift_from_the_last_good_dump_is_reported():
 
 
 def test_state_lives_under_xdg_state_home(state):
-    assert burst.state_dir() == str(state / "blazectl")
+    assert burst.state_dir() == str(state / "aurora")
     assert burst.load_last_good() is None
     burst.save_last_good({1: 2, 3: 4})
     assert burst.load_last_good() == {1: 2, 3: 4}
-    assert list((state / "blazectl").iterdir()) == [state / "blazectl" / "last-good.json"]
+    assert list((state / "aurora").iterdir()) == [state / "aurora" / "last-good.json"]
 
 
 def test_apply_writes_one_burst_and_verifies_it(state, monkeypatch):
@@ -124,7 +124,7 @@ def test_recovery_reports_a_missing_device(state, monkeypatch, capsys):
     mem = full_image()
     monkeypatch.setattr(burst.device, "Device", lambda: FakeDevice(mem, fail_after=10))
     assert not burst.apply([patch_polling(1000)])
-    assert "blazectl rewrite --force" in capsys.readouterr().out
+    assert "aurora rewrite --force" in capsys.readouterr().out
 
 
 def test_rebaseline_saves_a_sane_read_and_refuses_a_bad_one(state, monkeypatch, capsys):
