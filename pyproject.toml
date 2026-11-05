@@ -1,12 +1,13 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "aurora"
 dynamic = ["version"]
 description = "Configure the EvoFox Blaze mouse from Linux"
-license = { file = "LICENSE" }
+license = "WTFPL"
+license-files = ["LICENSE"]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
