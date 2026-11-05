@@ -9,7 +9,7 @@ Aurora is not affiliated with EvoFox or Amkette.
 ## What it does
 
 - **`aurora`** is a command line tool. `aurora get` shows the settings. `aurora set KEY=VALUE ...` changes them in one burst.
-- **`aurora-tui`** is a terminal interface with tabs for the buttons, performance, backlight and profiles. It uses your terminal's own colours.
+- **`aurora-tui`** is a terminal interface laid out like the vendor app. It has Button, Macro, Performance and Backlight tabs. The profile buttons, Apply and Cancel run along the bottom. A mouse drawing sits beside the buttons. The arrow keys move to the nearest control. Enter opens a list or toggles. It needs an 80x24 terminal. It uses your terminal's own colours.
 
 You can change:
 
@@ -63,7 +63,7 @@ aurora rebaseline
 
 ## Not supported yet
 
-Macros, keyboard, media and shortcut button assignments, music lighting and button tables for profiles 1 to 3 other than button 8.
+Macros, keyboard, media and shortcut button assignments, music lighting and button tables for profiles 1 to 3 other than button 8. Import, Export and Reset are drawn in the interface but are not available yet.
 
 The values of most DPI indices are not known. `dpi.N=` accepts only 600, 1200, 1800, 2400, 4800, 7200 and 12800 by value.
 

@@ -55,7 +55,7 @@ Image layout
   0x019  DPI stage enable bits, bit n for stage n+1, 3f is all six
   0x01a  fire time in ms, little-endian u16 with 0x01b, up to 300
   0x01c  high nibble 8 | (LED effect & 7), low nibble LED cycle time
-  0x01d  colour cycle enable bits, bit 7 is always set
+  0x01d  colour cycle enable bits, bit 7 is always set. Bit n is assumed to enable colour n.
   0x01e  polling, see below
   0x020..0x031  six stage colours, R G B each, 18 bytes. The low nibble is the DPI stage colour.
          The high nibble is the LED user colour. Both share the bytes.
