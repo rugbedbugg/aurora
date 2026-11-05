@@ -9,7 +9,7 @@ Aurora is not affiliated with EvoFox or Amkette.
 ## What it does
 
 - **`aurora`** is a command line tool. `aurora get` shows the settings. `aurora set KEY=VALUE ...` changes them in one burst.
-- **`aurora-tui`** is a terminal interface laid out like the vendor app. It has Button, Macro, Performance and Backlight tabs. The profile buttons, Apply and Cancel run along the bottom. A mouse drawing sits beside the buttons. The arrow keys move to the nearest control. Enter opens a list or toggles. It needs an 80x24 terminal. It uses your terminal's own colours.
+- **`aurora-tui`** is a terminal interface laid out like the vendor app and styled like rmpc. It has Button, Macro, Performance and Backlight tabs. Each tab is a set of bordered panes. The profile buttons, Apply and Cancel run along the bottom. A header shows the polling rate, the active DPI and the effect. It needs an 80x24 terminal and uses your terminal's own colours.
 
 You can change:
 
@@ -51,7 +51,19 @@ aurora rewrite
 aurora rebaseline
 ```
 
-`aurora --help` lists every setting and value. `aurora-tui` has a key list under `?`. `aurora-tui --offline` opens it on a sample image and writes nothing.
+`aurora --help` lists every setting and value. `aurora-tui --offline` opens the interface on a sample image and writes nothing.
+
+### Keys in `aurora-tui`
+
+The keys follow rmpc. `?` shows the full list.
+
+- `h j k l` or the arrow keys move to the nearest control. `Enter` opens a list, toggles or presses a button.
+- `+` and `-` adjust a slider. `s` makes the selected DPI stage the active one.
+- `Tab`, `1` to `4` and `gt` / `gT` change tab. `gg` and `G` jump to the first and last control.
+- `u` undoes the selected control. `x` undoes every pending change. `a` applies them.
+- `:` opens a command line. `:set polling=1000 dpi.6=7200` stages settings with the same names as `aurora set`. `:apply`, `:cancel`, `:reload`, `:tab NAME` and `:q` also work. `:q!` quits without asking.
+
+The interface draws rounded borders when the terminal locale is UTF-8. Run `aurora-tui --square` or set `AURORA_BORDERS=square` for square corners, for example with a bitmap font that lacks the rounded glyphs. On the Linux console and in non-UTF-8 locales it falls back to ASCII and line-drawing characters.
 
 ## Safety
 
