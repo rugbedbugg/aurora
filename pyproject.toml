@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blazectl"
+dynamic = ["version"]
+description = "Configure the EvoFox Blaze mouse from Linux"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Environment :: Console :: Curses",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Hardware",
+]
+
+[project.scripts]
+blazectl = "blazectl.cli:main"
+blazetui = "blazectl.tui:main"
+
+[tool.setuptools.packages.find]
+include = ["blazectl*"]
+
+[tool.setuptools.package-data]
+blazectl = ["data/*.json"]
+
+[tool.setuptools.dynamic]
+version = { attr = "blazectl.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "PLW1510", "RUF046", "RUF100"]
