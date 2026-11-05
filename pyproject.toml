@@ -7,6 +7,7 @@ name = "aurora"
 dynamic = ["version"]
 description = "Configure the EvoFox Blaze mouse from Linux"
 license = { file = "LICENSE" }
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 classifiers = [
