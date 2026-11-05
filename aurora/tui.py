@@ -1,7 +1,7 @@
 """A curses front end for Aurora that follows the layout of the vendor app.
 
-The screen is an 80x24 canvas. Every control has a fixed place on it, and the arrow keys
-move the focus to the nearest control in that direction.
+The screen is an 80x24 canvas. Every control has a fixed place on it. The arrow keys move
+the focus to the nearest control in that direction.
 """
 
 import contextlib
@@ -61,7 +61,7 @@ KEYS = [
     "] / [               adjust a slider by 1",
     "r g b / R G B       raise / lower a colour channel on a swatch",
     "s                   make the selected DPI stage the active one",
-    "Tab / Shift-Tab     next / previous tab",
+    "Tab / Shift-Tab     next / previous tab (Shift-Tab needs a terminal that sends it)",
     "u                   undo the selected control",
     "x                   undo every pending change (same as Cancel)",
     "a                   apply the pending changes",
@@ -117,7 +117,7 @@ class Widget:
 
 
 class Model:
-    """The settings being edited. It holds the device image and the pending edits, and no curses."""
+    """The settings being edited. It holds the device image and the pending edits. It has no curses code."""
 
     def __init__(self, base, offline=False, structure=None, drift=None):
         self.base = base
@@ -171,7 +171,7 @@ class Model:
 
 
 def nearest(widgets, cur, direction):
-    """Return the focusable widget closest to cur in a direction, or None."""
+    """Return the focusable widget closest to cur in a direction. Return None if there is none."""
     cx, cy = cur.x + cur.w / 2, cur.y
     best, best_score = None, None
     for w in widgets:
@@ -690,7 +690,7 @@ class Screen:
             self.put(w.y, w.x, f"[ {w.text} ]", attr | (curses.A_BOLD if current else 0))
         elif w.kind == "pick":
             text = w.value(work)
-            s = f"[{text:<{w.w - 3}}v]" if w.w >= 12 else text.center(w.w)
+            s = f"[{text:<{w.w - 3}}v]" if w.w >= 12 else text.ljust(w.w)
             self.put(w.y, w.x, s, attr)
         elif w.kind == "toggle":
             on = w.selected(work)
@@ -784,7 +784,7 @@ class Screen:
                 return False
 
     def popup(self, title, labels, current):
-        """Show a list over the canvas. Return the chosen index, or None if it is cancelled."""
+        """Show a list over the canvas. Return the chosen index. Return None if it is cancelled."""
         height = min(len(labels), 14)
         width = max(len(s) for s in [*labels, title]) + 6
         y0, x0 = (CANVAS_H - height - 2) // 2, (CANVAS_W - width) // 2
@@ -825,6 +825,9 @@ class Screen:
 
     def move(self, direction):
         target = nearest(self.widgets, self.focus, direction)
+        if direction == "up" and target is not None and target.kind == "tab":
+            # Enter the tab bar on the tab that is open.
+            target = next(w for w in self.widgets if w.kind == "tab" and w.index == self.tab)
         if target is not None:
             self.focus = target
             if target.stage is not None:

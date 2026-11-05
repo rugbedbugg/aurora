@@ -32,7 +32,7 @@ def last_good_path():
 
 
 def load_last_good():
-    """Return the last image that was verified on the mouse, or None on a first run."""
+    """Return the last image that was verified on the mouse. Return None on a first run."""
     try:
         with open(last_good_path()) as f:
             return {int(k): v for k, v in json.load(f).items()}
