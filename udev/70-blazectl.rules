@@ -1,0 +1,2 @@
+# Let the logged in user open the EvoFox Blaze config interface without root.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="30fa", ATTRS{idProduct}=="1440", TAG+="uaccess"
