@@ -307,7 +307,7 @@ class Screen:
             self.scr.refresh()
             return
         title = (
-            "EvoFox Blaze"
+            "Aurora: EvoFox Blaze"
             + ("  [offline]" if self.offline else "")
             + ("  [read only]" if self.structure else "")
         )

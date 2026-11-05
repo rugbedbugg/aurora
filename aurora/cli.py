@@ -217,7 +217,7 @@ def cmd_rebaseline(args):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="aurora",
-        description="Read and change EvoFox Blaze settings.",
+        description="Aurora: read and change EvoFox Blaze settings.",
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
