@@ -128,6 +128,16 @@ def set_cycle_colours(img, mask):
     img[0x1D] = 0x80 | mask
 
 
+def set_cycle_colour_enabled(img, n, on):
+    if not 0 <= n <= 6:
+        raise ValueError("colour must be 0..6")
+    _bit(img, 0x1D, n, on)
+
+
+def get_cycle_colour_enabled(img, n):
+    return bool(img[0x1D] >> n & 1)
+
+
 def set_brightness(img, level):
     _nibble(img, 0x3F, True, level)
 

@@ -106,6 +106,18 @@ def test_colours_round_trip():
         assert image.get_dpi_colour(img, stage) == (3, 14, 0)
 
 
+def test_cycle_colour_enables_are_bits_of_one_byte():
+    img = image.load_sample()
+    assert all(image.get_cycle_colour_enabled(img, n) for n in range(7))
+    image.set_cycle_colour_enabled(img, 0, False)
+    assert img[0x1D] == 0xFE
+    assert not image.get_cycle_colour_enabled(img, 0)
+    image.set_cycle_colour_enabled(img, 0, True)
+    assert img[0x1D] == 0xFF
+    with pytest.raises(ValueError):
+        image.set_cycle_colour_enabled(img, 7, True)
+
+
 def test_colour_values_above_a_nibble_are_refused():
     with pytest.raises(ValueError):
         image.set_dpi_colour(image.load_sample(), 0, 16, 0, 0)
