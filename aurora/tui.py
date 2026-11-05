@@ -115,6 +115,8 @@ PANES = {
     "Backlight": [Pane(3, 1, 15, 34, "Blaze"), Pane(3, 35, 15, 44, "Lighting")],
 }
 ACTION_PANE = Pane(18, 1, 4, 78, "")
+COLOUR_MODAL_W = 38
+COLOUR_HINT = "j/k channel  +/- value  Enter ok"
 
 
 def clamp(value, lo, hi):
@@ -954,7 +956,8 @@ class Screen:
         """Edit the red, green and blue values of a swatch. Return True when the edit was confirmed."""
         rgb = list(w.rgb[0](self.model.work))
         channel = 0
-        y0, x0, width = 8, 24, 32
+        y0, width = 8, COLOUR_MODAL_W
+        x0 = (CANVAS_W - width) // 2
         while True:
             for yy in range(y0, y0 + 7):
                 self.put(yy, x0, " " * width)
@@ -968,7 +971,7 @@ class Screen:
                 self.put(row, x0 + 22, f"{rgb[i]:>2}")
             text, sattr = self.swatch(tuple(rgb))
             self.put(y0 + 4, x0 + 5, text, sattr)
-            self.put(y0 + 5, x0 + 2, "j/k channel  +/- value  Enter ok", curses.A_DIM)
+            self.put(y0 + 5, x0 + 2, COLOUR_HINT, curses.A_DIM)
             self.scr.refresh()
             key = self.scr.getch()
             if key in (curses.KEY_DOWN, ord("j")):

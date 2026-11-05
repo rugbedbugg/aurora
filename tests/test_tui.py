@@ -336,3 +336,9 @@ def test_every_hint_fits_the_border_title_with_the_colour_prefix(tabs):
         for w in widgets:
             prefix = len("R 15 G 15 B 15  ") if w.kind == "swatch" else 0
             assert len(w.hint) + prefix <= 68, (w.key, w.hint)
+
+
+def test_the_colour_modal_text_fits_inside_its_border():
+    assert len(tui.COLOUR_HINT) <= tui.COLOUR_MODAL_W - 4
+    assert 22 + 2 <= tui.COLOUR_MODAL_W - 2
+    assert tui.COLOUR_MODAL_W < tui.CANVAS_W
