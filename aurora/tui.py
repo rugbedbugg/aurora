@@ -1,6 +1,7 @@
 """A curses front end for Aurora. It is laid out like the vendor app and styled like rmpc.
 
-The screen is an 80x24 canvas of bordered panes. Every control has a fixed place in a pane.
+The screen is a set of bordered panes that fill the terminal. A layout computed from the terminal
+size gives every control its place, so the panes grow with the window down to 80x24.
 The arrow keys and h, j, k and l move the focus to the nearest control in that direction.
 """
 
@@ -12,9 +13,14 @@ import os
 import sys
 from collections import OrderedDict, namedtuple
 
-from aurora import burst, cli, device, image
+from aurora import banner, burst, cli, device, image, logos, pointer, preview, sysinfo
 
-CANVAS_W, CANVAS_H = 80, 24
+MIN_W, MIN_H = 80, 24
+MAX_BAR = 60
+MAX_SWATCH_W, MAX_SWATCH_H = 16, 6
+INLINE_DPI_W = 13
+LABEL_W = 20
+EFFECT_LABEL_W = 8
 POLLING = [125, 250, 500, 1000]
 KNOWN_DPI = sorted(image.DPI_LABEL)
 PROFILE_NAMES = ["Office", "Game I", "Game II", "Media"]
@@ -67,6 +73,8 @@ KEYS = [
     "1 2 3 4             go to a tab",
     "gt / gT             next / previous tab",
     "gg / G              first / last control",
+    "PgUp / PgDn         scroll the config preview",
+    "Ctrl-U / Ctrl-D     scroll the config preview by half a page",
     "u                   undo the selected control",
     "x                   undo every pending change (same as Cancel)",
     "a                   apply the pending changes",
@@ -87,44 +95,140 @@ COMMANDS = [
     "quit! (or q!)       quit without asking",
     "help                this list",
 ]
-ART = [
-    r"      .--------.      ",
-    r"    .' 1  |  2  '.    ",
-    r"   /      |3|      \  ",
-    r"  | 8     |_|       | ",
-    r"  |     6     7     | ",
-    r" 4|                 | ",
-    r" 5|                 | ",
-    r"  \                 / ",
-    r"   '.             .'  ",
-    r"     '-._______.-'    ",
-]
-
 Edit = namedtuple("Edit", "key patch")
 Pane = namedtuple("Pane", "y x h w title")
 Command = namedtuple("Command", "action edits arg")
+Layout = namedtuple("Layout", "h w body_y body_h action_y action_h status_y footer_y split")
 
-PANES = {
-    "Button": [
-        Pane(3, 1, 15, 26, "Buttons 1-4"),
-        Pane(3, 27, 15, 26, "Blaze"),
-        Pane(3, 53, 15, 26, "Buttons 5-8"),
-    ],
-    "Macro": [Pane(3, 1, 15, 78, "Macros")],
-    "Performance": [Pane(3, 1, 15, 37, "Mouse"), Pane(3, 38, 15, 41, "Polling and DPI")],
-    "Backlight": [Pane(3, 1, 15, 34, "Blaze"), Pane(3, 35, 15, 44, "Lighting")],
-}
-ACTION_PANE = Pane(18, 1, 4, 78, "")
-COLOUR_MODAL_W = 38
+COLOUR_MODAL_MIN_W, COLOUR_MODAL_MAX_W = 38, 72
 COLOUR_HINT = "j/k channel  +/- value  Enter ok"
+MIN_DIAGRAM_H, MIN_DIAGRAM_W = 9, 11
+DIAGRAM_ASPECT = 1.5
+BUTTONS_PANE_W = (30, 46)
+NOT_OFFICE = " not Office: these buttons are not in use "
+# The split layout has the banner, a 60/40 split and the config preview.
+SPLIT_MIN_H, SPLIT_MIN_W = 30, 100
+LEFT_SHARE = 0.60
+BANNER_ROWS = 6
+BUTTONS_PANE_H = 13
+# The System section holds the stats (8 rows) or a logo, plus its border. The full logo needs 20 rows.
+SYSTEM_SMALL_H, SYSTEM_FULL_H = 11, 23
+MOUSE_PANE_H = (13, 23)
+PREVIEW_MIN_H = 10
+PREVIEW_TITLE = "aurora.toml"
+PREVIEW_SECTION = {
+    "Button": "buttons",
+    "Macro": "header",
+    "Performance": "performance",
+    "Backlight": "backlight",
+}
 
 
 def clamp(value, lo, hi):
     return max(lo, min(hi, value))
 
 
+def make_layout(h, w):
+    """Return the rows of the screen for a terminal of h rows and w columns (at least 80x24).
+
+    From SPLIT_MIN_H rows and SPLIT_MIN_W columns the screen has the banner and the split layout.
+    """
+    split = h >= SPLIT_MIN_H and w >= SPLIT_MIN_W
+    action_h = (4 if h < 40 else 6) if split else (4 if h < 30 else 6)
+    body_y = BANNER_ROWS + 1 if split else 3
+    body_h = h - body_y - action_h - 2
+    return Layout(h, w, body_y, body_h, body_y + body_h, action_h, h - 2, h - 1, split)
+
+
+def diagram_size(room_w, room_h, reserve):
+    """Return the width and height of the mouse drawing for a pane interior.
+
+    reserve is the number of rows kept free below the top padding. The width is odd so that the
+    divider sits in the middle. The body is about 1.5 times as wide as it is tall in cells.
+    """
+    height = max(MIN_DIAGRAM_H, room_h - reserve)
+    width = round(height * DIAGRAM_ASPECT) // 2 * 2 + 1
+    widest = room_w - 4 if (room_w - 4) % 2 else room_w - 5
+    return max(MIN_DIAGRAM_W, min(width, widest)), height
+
+
+def split_panes(layout):
+    """Return the panes of every tab in the split layout.
+
+    Settings sit on the left. The config preview sits on the right. The System section and the
+    mouse pane appear only when the pane below them keeps its minimum height.
+    """
+    y, h, span = layout.body_y, layout.body_h, layout.w - 2
+    left = round(span * LEFT_SHARE)
+    right_x, right_w = 1 + left, span - left
+    preview_pane = Pane(y, right_x, h, right_w, PREVIEW_TITLE)
+    spare = h - BUTTONS_PANE_H
+    system_h = SYSTEM_FULL_H if spare >= SYSTEM_FULL_H else SYSTEM_SMALL_H if spare >= SYSTEM_SMALL_H else 0
+    button_panes = [Pane(y, 1, system_h, left, "System")] if system_h else []
+    button_panes.append(Pane(y + system_h, 1, h - system_h, left, "Buttons"))
+    mouse_h = clamp(h // 2, *MOUSE_PANE_H)
+    if h - mouse_h >= PREVIEW_MIN_H:
+        button_panes.append(Pane(y, right_x, mouse_h, right_w, "Blaze"))
+        button_panes.append(Pane(y + mouse_h, right_x, h - mouse_h, right_w, PREVIEW_TITLE))
+    else:
+        button_panes.append(preview_pane)
+    return {
+        "Button": button_panes,
+        "Macro": [Pane(y, 1, h, left, "Macros"), preview_pane],
+        "Performance": [Pane(y, 1, h, left, "Performance"), preview_pane],
+        "Backlight": [Pane(y, 1, h, left, "Lighting"), preview_pane],
+    }
+
+
+def make_panes(layout):
+    """Return the panes of every tab and the pane of the bottom bar."""
+    span = layout.w - 2
+    action = Pane(layout.action_y, 1, layout.action_h, span, "")
+    if layout.split:
+        return split_panes(layout), action
+    y, h = layout.body_y, layout.body_h
+    buttons = clamp(round(span * 0.32), *BUTTONS_PANE_W)
+    button_panes = [Pane(y, 1, h, buttons, "Buttons"), Pane(y, 1 + buttons, h, span - buttons, "Blaze")]
+    perf = round(span * 0.40)
+    light = clamp(diagram_size(10**6, h - 2, 2)[0] + 8, 24, round(span * 0.44))
+    panes = {
+        "Button": button_panes,
+        "Macro": [Pane(y, 1, h, span, "Macros")],
+        "Performance": [Pane(y, 1, h, perf, "Mouse"), Pane(y, 1 + perf, h, span - perf, "Polling and DPI")],
+        "Backlight": [Pane(y, 1, h, light, "Blaze"), Pane(y, 1 + light, h, span - light, "Lighting")],
+    }
+    return panes, action
+
+
+def pane_titled(panes, title):
+    """Return the first pane with a title. Return None when there is none."""
+    return next((p for p in panes if p.title == title), None)
+
+
+def inner(pane):
+    """Return x, y, width and height of the room inside a pane, after the border and the marker column."""
+    return pane.x + 2, pane.y + 1, pane.w - 4, pane.h - 2
+
+
+def stack(top, room, items, pad=1):
+    """Return the y of each (height, gap) item.
+
+    One row of padding goes above the first item when there is room for it. Spare rows widen the
+    gaps, by at most one row each.
+    """
+    used = sum(h + g for h, g in items)
+    pad = pad if room - used >= pad else 0
+    gaps = sum(1 for _, g in items if g)
+    extra = clamp((room - used - pad) // gaps, 0, 1) if gaps else 0
+    ys, y = [], top + pad
+    for h, g in items:
+        ys.append(y)
+        y += h + (g + extra if g else 0)
+    return ys
+
+
 class Widget:
-    """One control or label at a fixed place on the canvas."""
+    """One control or label at a place on the screen. h is its height in rows."""
 
     def __init__(self, kind, key, y, x, w, **kw):
         self.kind, self.key, self.y, self.x, self.w = kind, key, y, x, w
@@ -143,6 +247,10 @@ class Widget:
         self.hint = kw.get("hint", "")
         self.enabled = kw.get("enabled", True)
         self.dim = kw.get("dim", False)
+        self.live = kw.get("live")
+        self.h = kw.get("h", 1)
+        self.area = kw.get("area", "body")
+        self.group = self.area
 
     @property
     def focusable(self):
@@ -156,8 +264,9 @@ class CommandError(Exception):
 class Model:
     """The settings being edited. It holds the device image and the pending edits. It has no curses code."""
 
-    def __init__(self, base, offline=False, structure=None, drift=None):
+    def __init__(self, base, offline=False, structure=None, drift=None, pointer=None):
         self.base = base
+        self.pointer = pointer
         self.work = dict(base)
         self.pending = OrderedDict()
         self.offline = offline
@@ -202,26 +311,34 @@ class Model:
 
 
 def nearest(widgets, cur, direction):
-    """Return the focusable widget closest to cur in a direction. Return None if there is none."""
-    cx, cy = cur.x + cur.w / 2, cur.y
-    best, best_score = None, None
+    """Return the focusable widget closest to cur in a direction. Return None if there is none.
+
+    Up and down stay inside the pane of cur when it has a control in that direction.
+    """
+    cx, cy = cur.x + cur.w / 2, cur.y + (cur.h - 1) / 2
+    best, same = None, None
     for w in widgets:
         if w is cur or not w.focusable:
             continue
-        dx, dy = w.x + w.w / 2 - cx, w.y - cy
+        dx, dy = w.x + w.w / 2 - cx, w.y + (w.h - 1) / 2 - cy
+        same_line = max(1, (cur.h + w.h) / 2 - 0.5)
         if direction == "up" and dy < 0:
-            score = -dy * 4 + abs(dx)
+            score = -dy * 10 + abs(dx)
         elif direction == "down" and dy > 0:
-            score = dy * 4 + abs(dx)
-        elif direction == "left" and dx < 0 and abs(dy) <= 1:
+            score = dy * 10 + abs(dx)
+        elif direction == "left" and dx < 0 and abs(dy) <= same_line:
             score = -dx + abs(dy) * 8
-        elif direction == "right" and dx > 0 and abs(dy) <= 1:
+        elif direction == "right" and dx > 0 and abs(dy) <= same_line:
             score = dx + abs(dy) * 8
         else:
             continue
-        if best_score is None or score < best_score:
-            best, best_score = w, score
-    return best
+        if best is None or score < best[0]:
+            best = (score, w)
+        if w.group == cur.group and (same is None or score < same[0]):
+            same = (score, w)
+    if direction in ("up", "down") and same is not None:
+        best = same
+    return best[1] if best else None
 
 
 def dpi_label(n):
@@ -318,15 +435,29 @@ def parse_command(text):
     raise CommandError(f"unknown command {name!r}")
 
 
-def tab_widgets():
+def tab_widgets(layout):
     spec = [("Button", 2), ("Macro", 11), ("Performance", 19), ("Backlight", 33)]
     return [
-        Widget("tab", f"tab.{name}", 2, x, len(name) + 2, text=name, index=i, hint="Enter opens the tab")
+        Widget(
+            "tab",
+            f"tab.{name}",
+            layout.body_y - 1,
+            x,
+            len(name) + 2,
+            text=name,
+            index=i,
+            hint="Enter opens the tab",
+            area="tabs",
+        )
         for i, (name, x) in enumerate(spec)
     ]
 
 
-def footer_widgets():
+def footer_widgets(layout):
+    small = layout.action_h == 4
+    row = layout.action_y + (1 if small else 2)
+    spare = layout.action_y + (2 if small else 4)
+    pad = 2 if layout.w < 100 else 4
     widgets = []
     x = 3
     for i, name in enumerate(PROFILE_NAMES):
@@ -335,34 +466,60 @@ def footer_widgets():
             Widget(
                 "choice",
                 "profile",
-                19,
+                row,
                 x,
                 w,
                 text=name,
                 selected=lambda img, i=i: profile_of(img) == i,
                 choose=lambda img, i=i: Edit("profile", lambda im: image.set_profile(im, i)),
                 hint="the Button tab edits the Office table only",
+                area="foot",
             )
         )
-        x += w + 2
+        x += w + pad
+    cancel_x = layout.w - 13
     widgets.append(
-        Widget("action", "apply", 19, 57, 9, text="Apply", action="apply", hint="write the pending changes")
+        Widget(
+            "action",
+            "apply",
+            row,
+            cancel_x - 10,
+            9,
+            text="Apply",
+            action="apply",
+            hint="write the pending changes",
+            area="foot",
+        )
     )
     widgets.append(
-        Widget("action", "cancel", 19, 67, 10, text="Cancel", action="cancel", hint="undo every change")
+        Widget(
+            "action",
+            "cancel",
+            row,
+            cancel_x,
+            10,
+            text="Cancel",
+            action="cancel",
+            hint="undo every change",
+            area="foot",
+        )
     )
     for text, x, w in (("Import", 3, 10), ("Export", 14, 10), ("Reset", 25, 9)):
-        widgets.append(Widget("action", text.lower(), 20, x, w, text=text, enabled=False))
+        widgets.append(Widget("action", text.lower(), spare, x, w, text=text, enabled=False, area="foot"))
     return widgets
 
 
-def button_widgets():
+def button_widgets(layout):
+    left = pane_titled(make_panes(layout)[0]["Button"], "Buttons")
+    x0, y0, iw, ih = inner(left)
+    music_y = y0 + ih - 1
+    stride = clamp((ih - 3) // 8, 1, 2)
+    first = y0 + max(1, (ih - 1 - (7 * stride + 1)) // 2)
+    pick_w = min(iw - 2, 36)
     widgets = []
     for n in range(1, 9):
-        left = n <= 4
-        y = 5 + 3 * ((n - 1) % 4)
-        number_x, box_x = (3, 5) if left else (55, 57)
-        widgets.append(Widget("label", None, y, number_x, 1, text=str(n)))
+        y = first + stride * (n - 1)
+        widgets.append(Widget("label", None, y, x0, 1, text=str(n)))
 
         def options(img, n=n):
             key = f"button.{n}"
@@ -376,50 +533,101 @@ def button_widgets():
                 "pick",
                 f"button.{n}",
                 y,
-                box_x,
-                20,
+                x0 + 2,
+                pick_w,
                 value=button_label(n),
                 options=options,
                 index=n,
                 hint="at least one button must stay Left Click",
             )
         )
-    widgets.append(Widget("action", "music", 16, 3, 18, text="Music-lighting", enabled=False))
+    widgets.append(Widget("action", "music", music_y, x0, 18, text="Music-lighting", enabled=False))
     return widgets
 
 
-def performance_widgets(model):
-    widgets = [
-        Widget("label", None, 4, 3, 17, text="Mouse Sensitivity", dim=True),
-        Widget("label", None, 5, 3, 31, text="[-----------o------]  set by OS", dim=True),
-        Widget("label", None, 7, 3, 12, text="Scroll Speed", dim=True),
-        Widget("label", None, 8, 3, 31, text="[-----------o------]  set by OS", dim=True),
-        Widget("label", None, 10, 3, 18, text="Double Click Speed"),
-        Widget(
-            "slider",
-            "fire-time",
-            11,
-            3,
-            32,
-            bar=lambda img: (fire_time(img), 0, 300, f"{fire_time(img)} / 300ms"),
-            adjust=lambda img, d, fine: Edit(
-                "fire-time",
-                (lambda ms: lambda im: image.set_fire_time(im, ms))(
-                    clamp(fire_time(img) + d * (1 if fine else 10), 0, 300)
+def spread(width, count, lowest=0):
+    """Return the item width, the gap and the left offset that centre count equal items in width cells."""
+    for gap in (2, 1):
+        item = min((width - gap * (count - 1)) // count, MAX_SWATCH_W)
+        if item >= max(lowest, 8):
+            break
+    return item, gap, (width - (count * item + gap * (count - 1))) // 2
+
+
+def pointer_widgets(model, x, ys, width, inline=False):
+    """Return the Mouse Sensitivity and Scroll Speed controls. They work only inside Hyprland.
+
+    ys holds one row for each control when inline is set. The label and the slider then share it.
+    Otherwise it holds the label row and the slider row of each control.
+    """
+    live = model.pointer
+    rows = [(ys[0], ys[0]), (ys[1], ys[1])] if inline else [(ys[0], ys[1]), (ys[2], ys[3])]
+    shift = LABEL_W if inline else 0
+    width = width - shift
+    out = []
+    for (label_y, bar_y), which, label, (lo, hi, _), fmt in zip(
+        rows,
+        ("sensitivity", "scroll"),
+        ("Mouse Sensitivity", "Scroll Speed"),
+        (pointer.SENSITIVITY, pointer.SCROLL),
+        ("{:+.1f}", "{:.2f}x"),
+        strict=True,
+    ):
+        if live is None:
+            dashes = width - 14
+            note = "[" + "-" * (dashes // 2) + "o" + "-" * (dashes - dashes // 2) + "]  set by OS"
+            out.append(Widget("label", None, label_y, x, len(label), text=label, dim=True))
+            out.append(Widget("label", None, bar_y, x + shift, width, text=note, dim=True))
+            continue
+        out.append(Widget("label", None, label_y, x, len(label), text=label))
+        out.append(
+            Widget(
+                "slider",
+                f"pointer.{which}",
+                bar_y,
+                x + shift,
+                width,
+                bar=lambda img, which=which, lo=lo, hi=hi, fmt=fmt: (
+                    getattr(live, which),
+                    lo,
+                    hi,
+                    fmt.format(getattr(live, which)),
                 ),
+                live=lambda d, fine, which=which: live.step(which, d),
+                hint="applies at once, resets when Hyprland reloads",
+            )
+        )
+    return out
+
+
+def fire_time_slider(x, y, width):
+    return Widget(
+        "slider",
+        "fire-time",
+        y,
+        x,
+        width,
+        bar=lambda img: (fire_time(img), 0, 300, f"{fire_time(img)} / 300ms"),
+        adjust=lambda img, d, fine: Edit(
+            "fire-time",
+            (lambda ms: lambda im: image.set_fire_time(im, ms))(
+                clamp(fire_time(img) + d * (1 if fine else 10), 0, 300)
             ),
-            hint="+/- by 10, [ and ] by 1, up to 300 ms",
         ),
-        Widget("label", None, 4, 41, 17, text="Polling Rate (Hz)"),
-    ]
-    x = 41
+        hint="+/- by 10, [ and ] by 1, up to 300 ms",
+    )
+
+
+def polling_widgets(x, label_y, choices_y, spacing):
+    """Return the Polling Rate label and its four choices."""
+    out = [Widget("label", None, label_y, x, 17, text="Polling Rate (Hz)")]
     for hz in POLLING:
         w = len(str(hz)) + 4
-        widgets.append(
+        out.append(
             Widget(
                 "choice",
                 "polling",
-                5,
+                choices_y,
                 x,
                 w,
                 text=str(hz),
@@ -427,16 +635,25 @@ def performance_widgets(model):
                 choose=lambda img, hz=hz: Edit("polling", lambda im: image.set_polling(im, hz)),
             )
         )
-        x += w + 2
-    widgets.append(Widget("label", None, 7, 41, 11, text="DPI Control"))
+        x += w + spacing
+    return out
+
+
+def dpi_widgets(model, gx, ys, item_w, gap, inline, sh, group_w):
+    """Return the six DPI stages and the DPI slider.
+
+    ys holds the rows of the label, the toggle, the value, the swatch and the slider. A stage has
+    its toggle and value on one row when inline is set.
+    """
+    widgets = [Widget("label", None, ys["label"], gx, 11, text="DPI Control")]
     for n in range(6):
-        x = 41 + 6 * n
+        x = gx + (item_w + gap) * n
         key = f"dpi.{n + 1}"
         widgets.append(
             Widget(
                 "toggle",
                 f"dpi-enable.{n + 1}",
-                8,
+                ys["toggle"],
                 x,
                 3,
                 toggle=lambda img, n=n: Edit(
@@ -459,9 +676,9 @@ def performance_widgets(model):
             Widget(
                 "pick",
                 key,
-                9,
-                x,
-                5,
+                ys["pick"],
+                x + 4 if inline else x,
+                item_w - 4 if inline else item_w,
                 value=dpi_label(n),
                 options=options,
                 stage=n,
@@ -472,9 +689,10 @@ def performance_widgets(model):
             Widget(
                 "swatch",
                 f"dpi-colour.{n + 1}",
-                10,
+                ys["swatch"],
                 x,
-                4,
+                item_w,
+                h=sh,
                 rgb=(
                     lambda img, n=n: image.get_dpi_colour(img, n),
                     lambda im, c, n=n: image.set_dpi_colour(im, n, *c),
@@ -499,9 +717,9 @@ def performance_widgets(model):
         Widget(
             "slider",
             "dpi-slider",
-            13,
-            41,
-            36,
+            ys["slider"],
+            gx,
+            group_w,
             bar=dpi_bar,
             adjust=dpi_adjust,
             hint="+/- changes the selected stage, s makes it the active stage",
@@ -510,15 +728,72 @@ def performance_widgets(model):
     return widgets
 
 
-def backlight_widgets():
+def dpi_rows(inline):
+    """Return the (height, gap) rows of the DPI block. The toggle and the value share a row when inline."""
+    return [(1, 0), (1, 0)] + ([] if inline else [(1, 0)]) + [(0, 0), (1, 1), (1, 0)]
+
+
+def performance_widgets(model, layout):
+    panes = make_panes(layout)[0]["Performance"]
+    if layout.split:
+        return performance_split(model, panes[0])
+    left, right = panes
+    x0, y0, iw, ih = inner(left)
+    bar_w = min(iw - 1, MAX_BAR)
+    ys = stack(y0, ih, [(1, 0), (1, 1), (1, 0), (1, 1), (1, 0), (1, 0)])
+    widgets = pointer_widgets(model, x0, ys[:4], bar_w)
+    widgets.append(Widget("label", None, ys[4], x0, 18, text="Double Click Speed"))
+    widgets.append(fire_time_slider(x0, ys[5], bar_w))
+    x0, y0, iw, ih = inner(right)
+    item_w, gap, offset = spread(iw, 6, INLINE_DPI_W)
+    inline = item_w >= INLINE_DPI_W
+    group_w = 6 * item_w + 5 * gap
+    gx = x0 + offset
+    sh = clamp(ih - (9 if inline else 10), 2, min(MAX_SWATCH_H, max(2, (item_w + 1) // 2)))
+    rows = [(1, 0), (1, 1)] + [(sh, 0) if h == 0 else (h, g) for h, g in dpi_rows(inline)]
+    ys = stack(y0, ih, rows)
+    widgets += polling_widgets(gx, ys[0], ys[1], 2 if iw < 60 else 4)
+    if inline:
+        ys.insert(3, ys[3])
+    row = dict(label=ys[2], toggle=ys[3], pick=ys[4], swatch=ys[5], slider=ys[7])
+    return widgets + dpi_widgets(model, gx, row, item_w, gap, inline, sh, group_w)
+
+
+def performance_split(model, pane):
+    """Return the controls of the Performance tab in one column."""
+    x0, y0, iw, ih = inner(pane)
+    item_w, gap, offset = spread(iw, 6, INLINE_DPI_W)
+    inline = item_w >= INLINE_DPI_W
+    group_w = 6 * item_w + 5 * gap
+    gx = x0 + offset
+    fixed = 12 + (0 if inline else 1)
+    sh = clamp(ih - fixed, 2, min(MAX_SWATCH_H, max(2, (item_w + 1) // 2)))
+    rows = [(1, 0), (1, 0), (1, 1), (1, 0), (1, 1)] + [
+        (sh, 0) if h == 0 else (h, g) for h, g in dpi_rows(inline)
+    ]
+    ys = stack(y0, ih, rows)
+    bar_w = min(group_w - LABEL_W, MAX_BAR)
+    widgets = pointer_widgets(model, gx, ys[:2], group_w, inline=True)
+    widgets.append(Widget("label", None, ys[2], gx, 18, text="Double Click Speed"))
+    widgets.append(fire_time_slider(gx + LABEL_W, ys[2], bar_w))
+    widgets += polling_widgets(gx, ys[3], ys[4], 2 if iw < 60 else 4)
+    if inline:
+        ys.insert(7, ys[6])
+    row = dict(label=ys[5], toggle=ys[6], pick=ys[7], swatch=ys[8], slider=ys[10])
+    return widgets + dpi_widgets(model, gx, row, item_w, gap, inline, sh, group_w)
+
+
+def led_widgets(gx, item_w, gap, group_w, sh, ys, notes, inline_effect=False):
+    """Return the lighting controls. ys holds the row of each part. notes are the direction notes."""
+    effect_x = gx + EFFECT_LABEL_W if inline_effect else gx
     widgets = [
-        Widget("label", None, 4, 38, 6, text="Effect"),
+        Widget("label", None, ys["effect_label"], gx, 6, text="Effect"),
         Widget(
             "pick",
             "effect",
-            5,
-            38,
-            30,
+            ys["effect"],
+            effect_x,
+            min(group_w - (effect_x - gx), 40),
             value=effect_label,
             options=lambda img: [
                 (name, Edit("effect", lambda im, i=i: image.set_led_effect(im, i)))
@@ -526,17 +801,18 @@ def backlight_widgets():
             ],
             hint="Enter lists the effects",
         ),
-        Widget("label", None, 6, 38, 13, text="Cycle colours"),
+        Widget("label", None, ys["cycle_label"], gx, 13, text="Cycle colours"),
     ]
     for n in range(7):
-        x = 38 + 5 * n
+        x = gx + (item_w + gap) * n
         widgets.append(
             Widget(
                 "swatch",
                 f"led-colour.{n}",
-                7,
+                ys["swatch"],
                 x,
-                4,
+                item_w,
+                h=sh,
                 rgb=(
                     lambda img, n=n: image.get_led_colour(img, n),
                     lambda im, c, n=n: image.set_led_colour(im, n, *c),
@@ -549,7 +825,7 @@ def backlight_widgets():
             Widget(
                 "toggle",
                 f"cycle-colour.{n}",
-                8,
+                ys["toggle"],
                 x,
                 3,
                 toggle=lambda img, n=n: Edit(
@@ -562,14 +838,15 @@ def backlight_widgets():
                 hint="the bit to colour order is assumed, check it on the mouse",
             )
         )
+    bar_x, bar_w = gx + 12, min(group_w - 12, MAX_BAR)
     widgets += [
-        Widget("label", None, 10, 38, 10, text="Brightness"),
+        Widget("label", None, ys["bright"], gx, 10, text="Brightness"),
         Widget(
             "slider",
             "brightness",
-            10,
-            50,
-            26,
+            ys["bright"],
+            bar_x,
+            bar_w,
             bar=lambda img: (img[0x3F] >> 4, 0, 15, str(img[0x3F] >> 4)),
             adjust=lambda img, d, fine: Edit(
                 "brightness",
@@ -577,13 +854,13 @@ def backlight_widgets():
             ),
             hint=UNVERIFIED,
         ),
-        Widget("label", None, 11, 38, 5, text="Speed"),
+        Widget("label", None, ys["speed"], gx, 5, text="Speed"),
         Widget(
             "slider",
             "cycle-time",
-            11,
-            50,
-            26,
+            ys["speed"],
+            bar_x,
+            bar_w,
             bar=lambda img: (
                 image.get_led_cycle_time(img) or 0,
                 0,
@@ -605,8 +882,8 @@ def backlight_widgets():
         Widget(
             "toggle",
             "symmetry",
-            13,
-            38,
+            ys["symmetry"],
+            gx,
             14,
             text="Symmetry",
             toggle=lambda img: Edit(
@@ -615,22 +892,133 @@ def backlight_widgets():
             ),
             selected=lambda img: bool(img[0x3A] >> 6 & 1),
         ),
-        Widget("label", None, 14, 38, 40, text="( ) Clockwise    ( ) Anti Clockwise", dim=True),
-        Widget("label", None, 15, 38, 40, text="( ) Two way      ( ) Overwrite", dim=True),
-        Widget("label", None, 16, 38, 40, text="direction is not decoded yet", dim=True),
     ]
+    for y, note in zip(ys["notes"], notes, strict=False):
+        widgets.append(Widget("label", None, y, gx, len(note), text=note, dim=True))
     return widgets
 
 
-def build_widgets(model):
+def direction_notes(roomy):
+    if roomy:
+        return [
+            "( ) Clockwise    ( ) Anti Clockwise",
+            "( ) Two way      ( ) Overwrite",
+            "direction is not decoded yet",
+        ]
+    return ["direction is not decoded yet"]
+
+
+def backlight_widgets(layout):
+    panes = make_panes(layout)[0]["Backlight"]
+    if layout.split:
+        return backlight_split(panes[0])
+    x0, y0, iw, ih = inner(panes[1])
+    item_w, gap, offset = spread(iw, 7)
+    group_w = 7 * item_w + 6 * gap
+    roomy = ih >= 20
+    sh = clamp(ih - (13 if roomy else 11), 2, min(MAX_SWATCH_H, max(2, (item_w + 1) // 2)))
+    rows = [(1, 0), (1, 1), (1, 0), (sh, 0), (1, 1), (1, 0), (1, 1), (1, 0)] + [(1, 0)] * (3 if roomy else 1)
+    ys = stack(y0, ih, rows)
+    row = dict(
+        effect_label=ys[0],
+        effect=ys[1],
+        cycle_label=ys[2],
+        swatch=ys[3],
+        toggle=ys[4],
+        bright=ys[5],
+        speed=ys[6],
+        symmetry=ys[7],
+        notes=ys[8:],
+    )
+    return led_widgets(x0 + offset, item_w, gap, group_w, sh, row, direction_notes(roomy))
+
+
+def backlight_split(pane):
+    """Return the controls of the Backlight tab in one column. The effect label and its list share a row."""
+    x0, y0, iw, ih = inner(pane)
+    item_w, gap, offset = spread(iw, 7)
+    group_w = 7 * item_w + 6 * gap
+    roomy = ih >= 20
+    sh = clamp(ih - (12 if roomy else 10), 2, min(MAX_SWATCH_H, max(2, (item_w + 1) // 2)))
+    rows = [(1, 1), (1, 0), (sh, 0), (1, 1), (1, 0), (1, 1), (1, 0)] + [(1, 0)] * (3 if roomy else 1)
+    ys = stack(y0, ih, rows)
+    row = dict(
+        effect_label=ys[0],
+        effect=ys[0],
+        cycle_label=ys[1],
+        swatch=ys[2],
+        toggle=ys[3],
+        bright=ys[4],
+        speed=ys[5],
+        symmetry=ys[6],
+        notes=ys[7:],
+    )
+    return led_widgets(x0 + offset, item_w, gap, group_w, sh, row, direction_notes(roomy), inline_effect=True)
+
+
+def build_widgets(model, layout):
     """Return the widgets of every tab. Each list also holds the tab bar and the bottom bar."""
-    common = tab_widgets() + footer_widgets()
-    return {
-        "Button": common + button_widgets(),
+    common = tab_widgets(layout) + footer_widgets(layout)
+    tabs = {
+        "Button": common + button_widgets(layout),
         "Macro": common,
-        "Performance": common + performance_widgets(model),
-        "Backlight": common + backlight_widgets(),
+        "Performance": common + performance_widgets(model, layout),
+        "Backlight": common + backlight_widgets(layout),
     }
+    panes = make_panes(layout)[0]
+    for name, widgets in tabs.items():
+        for w in widgets:
+            if w.area == "body":
+                w.group = next(
+                    (
+                        i
+                        for i, p in enumerate(panes[name])
+                        if p.x <= w.x < p.x + p.w and p.y <= w.y < p.y + p.h
+                    ),
+                    None,
+                )
+    return tabs
+
+
+def mouse_shape(width, height, unicode):
+    """Return the rows of the mouse drawing and the (row, column) of each button number.
+
+    A column of -2 puts a number just outside the left edge of the body.
+    """
+    if unicode:
+        tl, tr, bl, br, h, v, jt, jb, jl, jr = "╭╮╰╯─│┬┴├┤"
+    else:
+        tl = tr = bl = br = jt = jb = jl = jr = "+"
+        h, v = "-", "|"
+    grid = [[" "] * width for _ in range(height)]
+    cx = width // 2
+    top = max(4, round(height * 0.4))
+    wheel = max(3, min(top - 2, round(top * 0.6)))
+    grid[0] = [tl, *[h] * (width - 2), tr]
+    grid[-1] = [bl, *[h] * (width - 2), br]
+    for y in range(1, height - 1):
+        grid[y][0] = grid[y][-1] = v
+    grid[top] = [jl, *[h] * (width - 2), jr]
+    grid[0][cx], grid[top][cx] = jt, jb
+    for y in range(1 + wheel, top):
+        grid[y][cx] = v
+    grid[1][cx - 1 : cx + 2] = [tl, h, tr]
+    grid[wheel][cx - 1 : cx + 2] = [bl, h, br]
+    for y in range(2, wheel):
+        grid[y][cx - 1], grid[y][cx + 1] = v, v
+    top_row = 1 + (top - 2) // 3
+    side = top + 2
+    marks = {
+        1: (top_row, cx // 2),
+        2: (top_row, (cx + width - 1) // 2),
+        3: (1 + wheel // 2, cx),
+        8: (top - 1, cx // 2),
+        6: (side, width // 4),
+        7: (side, width - 1 - width // 4),
+        4: (side, -2),
+        5: (side + 1, -2),
+    }
+    return ["".join(row) for row in grid], marks
 
 
 def read_device(progress=None):
@@ -650,15 +1038,25 @@ def wants_unicode():
 class Screen:
     def __init__(self, scr, model, square=False):
         self.scr, self.model = scr, model
-        self.tabs = build_widgets(model)
+        h, w = scr.getmaxyx()
+        self.unicode = wants_unicode()
+        self.rounded = self.unicode and not square
+        self.os_key, self.os_name = logos.detect()
+        self.stats = sysinfo.gather()
+        self.banner = banner.render(self.unicode)
+        self.preview_top = self.preview_len = 0
+        self.preview_page = 1
+        self.preview_sig = None
+        self.layout = make_layout(max(h, MIN_H), max(w, MIN_W))
+        self.panes, self.action_pane = make_panes(self.layout)
+        self.tabs = build_widgets(model, self.layout)
         self.tab = 0
         self.focus = self.first_body()
         self.colours = False
         self.pairs = {}
-        self.unicode = wants_unicode()
-        self.rounded = self.unicode and not square
-        self.accent = self.current = self.mark = 0
-        self.oy = self.ox = 0
+        self.cube = {}
+        self.accent = self.current = self.mark = self.cyan = 0
+        self.red = self.green = self.magenta = 0
         curses.set_escdelay(25)
         try:
             curses.curs_set(0)
@@ -682,6 +1080,10 @@ class Screen:
                 curses.init_pair(8, curses.COLOR_BLUE, -1)
                 curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_BLUE)
                 curses.init_pair(10, curses.COLOR_YELLOW, -1)
+                curses.init_pair(11, curses.COLOR_CYAN, -1)
+                curses.init_pair(12, curses.COLOR_RED, -1)
+                curses.init_pair(13, curses.COLOR_GREEN, -1)
+                curses.init_pair(14, curses.COLOR_MAGENTA, -1)
                 self.colours = True
         except curses.error:
             self.colours = False
@@ -689,6 +1091,10 @@ class Screen:
             self.accent = curses.color_pair(8)
             self.current = curses.color_pair(9) | curses.A_BOLD
             self.mark = curses.color_pair(10) | curses.A_BOLD
+            self.cyan = curses.color_pair(11)
+            self.red = curses.color_pair(12)
+            self.green = curses.color_pair(13)
+            self.magenta = curses.color_pair(14)
         else:
             self.current = curses.A_REVERSE | curses.A_BOLD
             self.mark = curses.A_BOLD
@@ -702,12 +1108,24 @@ class Screen:
         return body[0] if body else self.widgets[0]
 
     def body(self):
-        found = [w for w in self.widgets if w.focusable and 3 < w.y < 18]
+        found = [w for w in self.widgets if w.focusable and w.area == "body"]
         return sorted(found, key=lambda w: (w.y, w.x))
+
+    def fit(self, h, w):
+        """Lay the screen out again when the terminal size changed. Keep the focus on the same control."""
+        if (self.layout.h, self.layout.w) == (h, w):
+            return
+        old = self.focus
+        self.layout = make_layout(h, w)
+        self.panes, self.action_pane = make_panes(self.layout)
+        self.tabs = build_widgets(self.model, self.layout)
+        same = (old.kind, old.key, old.text)
+        self.focus = (
+            next((x for x in self.widgets if (x.kind, x.key, x.text) == same), None) or self.first_body()
+        )
 
     def put(self, y, x, text, attr=0):
         h, w = self.scr.getmaxyx()
-        y, x = y + self.oy, x + self.ox
         if 0 <= y < h and 0 <= x < w:
             try:
                 self.scr.addstr(y, x, text[: max(0, w - x - 1)], attr)
@@ -716,7 +1134,7 @@ class Screen:
 
     def line(self, y, x, n):
         try:
-            self.scr.hline(y + self.oy, x + self.ox, curses.ACS_HLINE, n, self.accent)
+            self.scr.hline(y, x, curses.ACS_HLINE, n, self.accent)
         except curses.error:
             pass
 
@@ -733,7 +1151,7 @@ class Screen:
             for yy in range(y + 1, y + h - 1):
                 for xx in (x, x + w - 1):
                     try:
-                        self.scr.addch(yy + self.oy, xx + self.ox, curses.ACS_VLINE, self.accent)
+                        self.scr.addch(yy, xx, curses.ACS_VLINE, self.accent)
                     except curses.error:
                         pass
             self.line(y, x + 1, w - 2)
@@ -745,7 +1163,7 @@ class Screen:
                 (y + h - 1, x + w - 1, curses.ACS_LRCORNER),
             ):
                 try:
-                    self.scr.addch(yy + self.oy, xx + self.ox, ch, self.accent)
+                    self.scr.addch(yy, xx, ch, self.accent)
                 except curses.error:
                     pass
         if title:
@@ -753,6 +1171,7 @@ class Screen:
             self.put(y, x + w - len(title) - 4 if right else x + 2, f" {title} ")
 
     def swatch(self, rgb):
+        """Return the colour name and the attribute that paints it. The attribute is None if it cannot."""
         on = tuple(1 if c >= 8 else 0 for c in rgb)
         names = {
             (1, 0, 0): ("red", curses.COLOR_RED),
@@ -763,10 +1182,42 @@ class Screen:
             (0, 1, 1): ("cyan", curses.COLOR_CYAN),
             (1, 1, 1): ("white", curses.COLOR_WHITE),
         }
-        name, color = names.get(on, ("off", None))
-        if self.colours and color is not None:
-            return "    ", curses.color_pair(self.pairs[color])
-        return name[:4].ljust(4), curses.A_BOLD
+        name, color = names.get(on, ("off" if not any(rgb) else "dark", None))
+        if not self.colours:
+            return name, None
+        cube = self.cube_pair(rgb)
+        if cube is not None:
+            return name, cube
+        if color is not None:
+            return name, curses.color_pair(self.pairs[color])
+        return name, None
+
+    def cube_pair(self, rgb):
+        """Return the attribute for a colour from the 256 colour cube. Return None without such a cube."""
+        if curses.COLORS < 256 or not any(rgb):
+            return None
+        index = 16 + sum(round(v * 5 / 15) * 6**i for i, v in zip((2, 1, 0), rgb, strict=True))
+        if index == 16:
+            return None
+        if index not in self.cube:
+            pair = 15 + len(self.cube)
+            if pair >= curses.COLOR_PAIRS:
+                return None
+            curses.init_pair(pair, -1, index)
+            self.cube[index] = pair
+        return curses.color_pair(self.cube[index])
+
+    def paint(self, y, x, w, h, rgb):
+        """Fill a w by h block with a colour. Name the colour in the block when it cannot be painted."""
+        name, attr = self.swatch(rgb)
+        if attr is not None:
+            for row in range(h):
+                self.put(y + row, x, " " * w, attr)
+            return
+        fill = "░" if self.unicode else ":"
+        for row in range(h):
+            self.put(y + row, x, fill * w, curses.A_DIM)
+        self.put(y + h // 2, x + (w - len(name)) // 2, name[:w], curses.A_BOLD)
 
     def dirty(self, w):
         pending = self.model.pending
@@ -782,7 +1233,7 @@ class Screen:
         attr = curses.A_DIM if not w.enabled or w.dim else 0
         if focused:
             attr = self.current
-        if self.dirty(w):
+        if self.dirty(w) and w.kind != "swatch":
             self.put(w.y, w.x - 1, "*", self.mark)
         if w.kind == "label":
             self.put(w.y, w.x, w.text, attr)
@@ -792,11 +1243,11 @@ class Screen:
             self.put(w.y, w.x, f" {w.text} ", style | (curses.A_UNDERLINE if focused and not active else 0))
         elif w.kind == "pick":
             text = w.value(work)
-            s = f"[{text:<{w.w - 3}}v]" if w.w >= 12 else text.ljust(w.w)
+            s = f"[{text:<{w.w - 3}}v]" if w.w >= 9 else text.ljust(w.w)
             self.put(w.y, w.x, s, attr)
         elif w.kind == "toggle":
             on = w.selected(work)
-            self.put(w.y, w.x, f"[{'x' if on else ' '}]" + (f" {w.text}" if w.text else ""), attr)
+            self.put(w.y, w.x, f"[{'*' if on else ' '}]" + (f" {w.text}" if w.text else ""), attr)
         elif w.kind == "choice":
             on = w.selected(work)
             self.put(w.y, w.x, f"({'o' if on else ' '}) {w.text}", attr)
@@ -812,88 +1263,192 @@ class Screen:
             self.put(w.y, w.x + 1 + k, "█" if self.unicode else "o", self.accent)
             self.put(w.y, w.x + 2 + k, empty * (bw - 1 - k) + "] " + text, attr)
         elif w.kind == "swatch":
-            text, sattr = self.swatch(w.rgb[0](work))
+            self.paint(w.y, w.x, w.w, w.h, w.rgb[0](work))
             if focused:
-                self.put(w.y, w.x - 1, "[", self.current)
-                self.put(w.y, w.x + 4, "]", self.current)
-            self.put(w.y, w.x, text, sattr)
+                for row in range(w.h):
+                    self.put(w.y + row, w.x - 1, "[", self.current)
+                    self.put(w.y + row, w.x + w.w, "]", self.current)
+            if self.dirty(w):
+                self.put(w.y, w.x - 1, "*", self.mark)
 
-    def draw_art(self, x, numbers):
-        for y, line in enumerate(ART):
-            self.put(4 + y, x, "".join(" " if c.isdigit() else c for c in line), self.accent)
-        for y, line in enumerate(ART if numbers else []):
-            for dx, c in enumerate(line):
-                if c.isdigit():
-                    on = self.focus.key == f"button.{c}"
-                    self.put(4 + y, x + dx, c, self.current if on else 0)
+    def draw_mouse(self, pane, numbers, reserve):
+        """Draw the mouse in a pane. Highlight the number of the focused button when numbers is set."""
+        ix, iy, iw, ih = inner(pane)
+        bw, bh = diagram_size(iw, ih, reserve)
+        x0 = ix + 2 + (iw - bw - 2) // 2
+        y0 = iy + 1 + max(0, ih - reserve - bh) // 2
+        rows, marks = mouse_shape(bw, bh, self.unicode)
+        for dy, row in enumerate(rows):
+            self.put(y0 + dy, x0, row, self.accent)
+        if numbers:
+            for n, (dy, dx) in marks.items():
+                on = self.focus.key == f"button.{n}"
+                self.put(y0 + dy, x0 + dx, str(n), self.current if on else 0)
+
+    def draw_logo(self, pane, lines):
+        """Draw a logo in the middle of a pane."""
+        rows = logos.tones(lines)
+        height, width = logos.size(lines)
+        ix, iy, iw, ih = inner(pane)
+        y, x = iy + (ih - height) // 2, ix + (iw - width) // 2
+        for dy, row in enumerate(rows):
+            for tone, text in row:
+                self.put(y + dy, x, text, self.accent if tone == 1 else self.cyan or curses.A_BOLD)
+                x += len(text)
+            x = ix + (iw - width) // 2
+
+    def draw_system(self, pane):
+        """Draw the OS logo and the facts about this machine in the System section."""
+        ix, iy, iw, ih = inner(pane)
+        lines = logos.pick(self.os_key, ih, self.unicode)
+        x = ix + 1
+        if lines is not None:
+            height, width = logos.size(lines)
+            self.draw_logo(Pane(pane.y, pane.x, pane.h, width + 6, ""), lines)
+            x += width + 4
+        top = iy + max(0, (ih - len(self.stats)) // 2)
+        for i, (label, value) in enumerate(self.stats):
+            room = ix + iw - (x + 9)
+            if room < 4:
+                break
+            self.put(top + i, x, label, curses.A_DIM)
+            self.put(top + i, x + 9, preview.fit(value, room))
+
+    def draw_banner(self):
+        """Draw the AURORA banner and the profile name beside it."""
+        model = self.model
+        if self.colours:
+            hues = [self.accent, self.accent, self.magenta, self.magenta, self.red, self.red]
+            face = [hue | (curses.A_BOLD if i % 2 else 0) for i, hue in enumerate(hues)]
+            shade = [hue | curses.A_DIM for hue in hues]
+        else:
+            face, shade = [curses.A_BOLD] * banner.ZONES, [curses.A_DIM] * banner.ZONES
+        for run in self.banner.runs:
+            attr = (face if run.layer == "face" else shade)[run.zone]
+            self.put(run.y, 2 + run.x, run.text, attr)
+        x = 2 + self.banner.width + 2
+        flags = ("[offline]" if model.offline else "") + (" [read only]" if model.structure else "")
+        self.put(2, x, PROFILE_NAMES[profile_of(model.work)], self.accent)
+        self.put(3, x, flags.strip(), curses.A_DIM)
 
     def draw_header(self):
-        model = self.model
+        model, w = self.model, self.layout.w
+        if self.layout.split:
+            self.draw_banner()
+            text = summary(model.work)
+            self.put(self.layout.body_y - 1, w - 3 - len(text), text, curses.A_DIM)
+            return
         flags = ("[offline]" if model.offline else "") + (" [read only]" if model.structure else "")
         self.put(0, 2, "Aurora", self.accent)
-        self.put(0, 34, "EvoFox Blaze")
         profile = PROFILE_NAMES[profile_of(model.work)]
-        self.put(0, 77 - len(profile), profile, self.accent)
+        self.put(0, w - 3 - len(profile), profile, self.accent)
         self.put(1, 2, summary(model.work), curses.A_DIM)
-        self.put(1, 77 - len(flags), flags.strip(), curses.A_DIM)
+        self.put(1, w - 3 - len(flags.strip()), flags.strip(), curses.A_DIM)
+
+    def draw_preview(self, pane, tab):
+        """Draw the config preview. A changed value shows in place as a red old line then a green new one."""
+        ix, iy, iw, ih = inner(pane)
+        width = iw - 2
+        rows = preview.diff(preview.render(self.model.base, width), preview.render(self.model.work, width))
+        sig = (tab, tuple(self.model.pending))
+        if sig != self.preview_sig:
+            self.preview_sig = sig
+            change = preview.first_change(rows)
+            target = change if change is not None else preview.anchor(rows, PREVIEW_SECTION[tab])
+            self.preview_top = max(0, target - 1)
+        top = clamp(self.preview_top, 0, max(0, len(rows) - ih))
+        self.preview_top, self.preview_len, self.preview_page = top, len(rows), max(1, ih - 1)
+        marks = {"-": self.red or curses.A_BOLD, "+": self.green or curses.A_BOLD}
+        for i, row in enumerate(rows[top : top + ih]):
+            if row.tag != " ":
+                attr = marks[row.tag]
+            elif row.text.startswith("["):
+                attr = self.accent | curses.A_BOLD
+            else:
+                attr = curses.A_DIM
+            self.put(iy + i, ix, f"{row.tag} {row.text}", attr)
+        span = f" {top + 1}-{min(len(rows), top + ih)}/{len(rows)} "
+        self.put(pane.y, pane.x + pane.w - len(span) - 3, span, curses.A_DIM)
+
+    def scroll_preview(self, pages):
+        """Scroll the config preview by a number of pages. A negative number scrolls up."""
+        last = max(0, self.preview_len - self.preview_page - 1)
+        self.preview_top = clamp(self.preview_top + round(pages * self.preview_page), 0, last)
 
     def draw_status(self):
-        model = self.model
+        model, layout = self.model, self.layout
         if model.structure:
             banner = "read looks wrong, writes disabled: " + "; ".join(model.structure)
         elif model.drift:
             banner = "differs from the last verified state, press ! to accept it"
         else:
             banner = ""
-        text = (model.msg or banner)[:60]
-        self.put(22, 2, text, curses.A_BOLD if model.msg else 0)
+        text = (model.msg or banner)[: layout.w - 22]
+        self.put(layout.status_y, 2, text, curses.A_BOLD if model.msg else 0)
         count = len(model.pending)
         pending = f"{count} pending change{'s' if count != 1 else ''}"
-        self.put(22, 77 - len(pending), pending, self.mark if count else curses.A_DIM)
+        self.put(layout.status_y, layout.w - 3 - len(pending), pending, self.mark if count else curses.A_DIM)
 
     def draw(self):
         self.scr.erase()
         h, w = self.scr.getmaxyx()
-        if h < CANVAS_H or w < CANVAS_W:
-            self.put(0, 0, "need 80x24")
+        if h < MIN_H or w < MIN_W:
+            self.put(0, 0, f"need {MIN_W}x{MIN_H}")
             self.scr.refresh()
             return
-        self.oy, self.ox = (h - CANVAS_H) // 2, (w - CANVAS_W) // 2
+        self.fit(h, w)
+        layout = self.layout
         name = TABS[self.tab]
         self.draw_header()
-        for pane in PANES[name]:
+        for pane in self.panes[name]:
             self.box(*pane)
         hint = self.focus.hint
         if self.focus.kind == "swatch":
             r, g, b = self.focus.rgb[0](self.model.work)
             hint = f"R {r} G {g} B {b}  " + hint
-        self.box(*ACTION_PANE[:4], title=hint[:68], right=True)
+        self.box(*self.action_pane[:4], title=hint[: w - 12], right=True)
+        panes = self.panes[name]
+        mouse = pane_titled(panes, "Blaze")
         if name == "Button":
-            self.draw_art(30, True)
+            if mouse is not None:
+                self.draw_mouse(mouse, True, 3)
+                if self.focus.key and self.focus.key.startswith("button."):
+                    text = f"Button {self.focus.index}: {self.focus.value(self.model.work)}"
+                    self.put(mouse.y + mouse.h - 2, mouse.x + (mouse.w - len(text)) // 2, text, self.accent)
+            if pane_titled(panes, "System") is not None:
+                self.draw_system(pane_titled(panes, "System"))
         elif name == "Macro":
-            self.put(10, 26, "Macros are not supported yet", curses.A_DIM)
+            pane = panes[0]
+            note = "Macros are not supported yet"
+            self.put(pane.y + pane.h - 3, pane.x + (pane.w - len(note)) // 2, note, curses.A_DIM)
         elif name == "Backlight":
-            self.draw_art(6, False)
+            if mouse is not None:
+                self.draw_mouse(mouse, False, 2)
         else:
             active = self.model.work[0x18] - 0x18
-            self.put(11, 41 + 6 * active + 2, "▲" if self.unicode else "^", self.accent)
+            stage = next(x for x in self.widgets if x.kind == "swatch" and x.stage == active)
+            self.put(stage.y + stage.h, stage.x + stage.w // 2, "▲" if self.unicode else "^", self.accent)
         for widget in self.widgets:
             self.draw_widget(widget)
         if name == "Button" and profile_of(self.model.work):
-            self.put(17, 3, " not Office: these buttons are not in use ", self.mark)
+            pane = pane_titled(panes, "Buttons") if layout.split else mouse
+            self.put(pane.y + pane.h - 1, pane.x + 2, NOT_OFFICE, self.mark)
+        if layout.split:
+            self.draw_preview(pane_titled(panes, PREVIEW_TITLE), name)
         self.draw_status()
-        self.put(23, 2, FOOTER, curses.A_DIM)
+        self.put(layout.footer_y, 2, FOOTER, curses.A_DIM)
         self.scr.refresh()
 
     def draw_progress(self, label, frac):
         """Draw a progress bar on the status row. The writer calls this while it works."""
         full = "█" if self.unicode else "#"
-        room = 70 - len(label)
+        y, w = self.layout.status_y, self.layout.w
+        room = w - 10 - len(label)
         k = int(room * clamp(frac, 0, 1))
-        self.put(22, 0, " " * 79)
-        self.put(22, 2, label, self.accent)
-        self.put(22, 4 + len(label), full * k, self.accent)
-        self.put(22, 74, f"{int(frac * 100):3d}%", curses.A_DIM)
+        self.put(y, 0, " " * (w - 1))
+        self.put(y, 2, label, self.accent)
+        self.put(y, 4 + len(label), full * k, self.accent)
+        self.put(y, w - 6, f"{int(frac * 100):3d}%", curses.A_DIM)
         self.scr.refresh()
 
     def say(self, text):
@@ -904,19 +1459,23 @@ class Screen:
         self.say(question + " (y/n)")
         while True:
             key = self.scr.getch()
-            if key in (ord("y"), ord("Y")):
+            if key == curses.KEY_RESIZE:
+                self.draw()
+            elif key in (ord("y"), ord("Y")):
                 return True
-            if key in (ord("n"), ord("N"), 27):
+            elif key in (ord("n"), ord("N"), 27):
                 return False
 
     def popup(self, title, labels, current):
-        """Show a list over the canvas. Return the chosen index. Return None if it is cancelled."""
-        height = min(len(labels), 12)
-        width = max(len(s) for s in [*labels, title]) + 7
-        y0, x0 = (CANVAS_H - height - 2) // 2, (CANVAS_W - width) // 2
+        """Show a list over the screen. Return the chosen index. Return None if it is cancelled."""
         sel = current if current is not None else 0
         top = 0
         while True:
+            h, w = self.scr.getmaxyx()
+            height = min(len(labels), max(12, h - 12))
+            width = min(max(len(s) for s in [*labels, title]) + 7, w - 2)
+            width = max(width, min(36, w - 2))
+            y0, x0 = (h - height - 2) // 2, (w - width) // 2
             top = clamp(top, max(0, sel - height + 1), min(sel, max(0, len(labels) - height)))
             for yy in range(y0, y0 + height + 2):
                 self.put(yy, x0, " " * width)
@@ -928,7 +1487,9 @@ class Screen:
                 self.draw_scrollbar(y0 + 1, x0 + width - 3, height, top, len(labels))
             self.scr.refresh()
             key = self.scr.getch()
-            if key in (curses.KEY_DOWN, ord("j")):
+            if key == curses.KEY_RESIZE:
+                self.draw()
+            elif key in (curses.KEY_DOWN, ord("j")):
                 sel = min(len(labels) - 1, sel + 1)
             elif key in (curses.KEY_UP, ord("k")):
                 sel = max(0, sel - 1)
@@ -956,25 +1517,38 @@ class Screen:
         """Edit the red, green and blue values of a swatch. Return True when the edit was confirmed."""
         rgb = list(w.rgb[0](self.model.work))
         channel = 0
-        y0, width = 8, COLOUR_MODAL_W
-        x0 = (CANVAS_W - width) // 2
+        channel_pairs = [curses.COLOR_RED, curses.COLOR_GREEN, curses.COLOR_BLUE]
         while True:
-            for yy in range(y0, y0 + 7):
+            h, sw = self.scr.getmaxyx()
+            width = min(clamp(sw // 2, COLOUR_MODAL_MIN_W, COLOUR_MODAL_MAX_W), sw - 2)
+            room = width - 4
+            step = 2 if h >= 32 else 1
+            preview = clamp(h - 4 - (2 * step + 5), 3, min(10, max(3, room // 4)))
+            height = preview + 2 * step + 5
+            y0, x0 = (h - height) // 2, (sw - width) // 2
+            cell = max(1, (room - 7) // 15)
+            for yy in range(y0, y0 + height):
                 self.put(yy, x0, " " * width)
-            self.box(y0, x0, 7, width, w.text or "Colour")
-            full = "█" if self.unicode else "#"
-            for i, name in enumerate("RGB"):
-                row = y0 + 1 + i
-                bar = full * rgb[i] + " " * (15 - rgb[i])
-                self.put(row, x0 + 2, f"{name} ", self.current if i == channel else 0)
-                self.put(row, x0 + 5, bar, self.accent)
-                self.put(row, x0 + 22, f"{rgb[i]:>2}")
-            text, sattr = self.swatch(tuple(rgb))
-            self.put(y0 + 4, x0 + 5, text, sattr)
-            self.put(y0 + 5, x0 + 2, COLOUR_HINT, curses.A_DIM)
+            self.box(y0, x0, height, width, w.text or "Colour")
+            self.paint(y0 + 1, x0 + 2, room, preview, tuple(rgb))
+            name = self.swatch(tuple(rgb))[0]
+            self.put(y0 + preview + 1, x0 + 2, f"{name}  R {rgb[0]}  G {rgb[1]}  B {rgb[2]}", curses.A_DIM)
+            for i, letter in enumerate("RGB"):
+                row = y0 + preview + 2 + i * step
+                self.put(row, x0 + 2, f"{letter} ", self.current if i == channel else 0)
+                filled, empty = rgb[i] * cell, (15 - rgb[i]) * cell
+                if self.colours:
+                    self.put(row, x0 + 5, " " * filled, curses.color_pair(self.pairs[channel_pairs[i]]))
+                else:
+                    self.put(row, x0 + 5, ("█" if self.unicode else "#") * filled, self.accent)
+                self.put(row, x0 + 5 + filled, ("·" if self.unicode else ".") * empty, curses.A_DIM)
+                self.put(row, x0 + 6 + 15 * cell, f"{rgb[i]:>2}")
+            self.put(y0 + height - 2, x0 + 2, COLOUR_HINT, curses.A_DIM)
             self.scr.refresh()
             key = self.scr.getch()
-            if key in (curses.KEY_DOWN, ord("j")):
+            if key == curses.KEY_RESIZE:
+                self.draw()
+            elif key in (curses.KEY_DOWN, ord("j")):
                 channel = (channel + 1) % 3
             elif key in (curses.KEY_UP, ord("k")):
                 channel = (channel - 1) % 3
@@ -995,19 +1569,22 @@ class Screen:
         """Read a command on the status row. Return the text. Return None if it is cancelled."""
         text = ""
         while True:
-            self.put(22, 0, " " * 79)
-            self.put(22, 2, ":" + text + "_", self.accent)
+            y, w = self.layout.status_y, self.layout.w
+            self.put(y, 0, " " * (w - 1))
+            self.put(y, 2, ":" + text + "_", self.accent)
             self.scr.refresh()
             key = self.scr.getch()
-            if key in (10, 13, curses.KEY_ENTER):
+            if key == curses.KEY_RESIZE:
+                self.draw()
+            elif key in (10, 13, curses.KEY_ENTER):
                 return text
-            if key == 27:
+            elif key == 27:
                 return None
-            if key in (curses.KEY_BACKSPACE, 127, 8):
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
                 if not text:
                     return None
                 text = text[:-1]
-            elif 32 <= key < 127 and len(text) < 70:
+            elif 32 <= key < 127 and len(text) < w - 10:
                 text += chr(key)
 
     def run_command(self, text):
@@ -1088,7 +1665,9 @@ class Screen:
 
     def adjust(self, d, fine=False):
         w = self.focus
-        if w.kind == "slider" and w.adjust is not None:
+        if w.kind == "slider" and w.live is not None:
+            self.model.msg = w.live(d, fine)
+        elif w.kind == "slider" and w.adjust is not None:
             edit = w.adjust(self.model.work, d, fine)
             if edit is not None:
                 self.model.change(edit)
@@ -1131,16 +1710,21 @@ class Screen:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             try:
-                ok = burst.apply(list(model.pending.values()), False, progress=self.draw_progress)
+                result = burst.apply(list(model.pending.values()), False, progress=self.draw_progress)
             except Exception as exc:
-                ok = False
+                result = burst.Result(False)
                 print(exc)
         self.scr.clear()
         tail = buf.getvalue().strip().splitlines()
-        if ok and self.reload():
+        verified = getattr(result, "image", None)
+        if result and verified is not None:
+            model.reset(verified)
             model.drift = []
             model.msg = "applied and verified by read-back"
-        elif ok:
+        elif result and self.reload():
+            model.drift = []
+            model.msg = "applied and verified by read-back"
+        elif result:
             model.msg = "applied, but the reload failed: " + model.msg
         else:
             model.msg = "apply failed: " + (tail[-1] if tail else "unknown error")
@@ -1214,6 +1798,9 @@ class Screen:
                 self.adjust(1, True)
             elif key == ord("["):
                 self.adjust(-1, True)
+            elif key in (curses.KEY_NPAGE, curses.KEY_PPAGE, 4, 21):
+                pages = {curses.KEY_NPAGE: 1, curses.KEY_PPAGE: -1, 4: 0.5, 21: -0.5}[key]
+                self.scroll_preview(pages)
             elif key == ord("s"):
                 self.make_active()
             elif key == ord("u"):
@@ -1254,7 +1841,7 @@ def main(argv=None):
             return 3
         structure = burst.validate_read(base, None)
         drift = [p for p in burst.validate_read(base, burst.load_last_good()) if p not in structure]
-    model = Model(base, offline, structure, drift)
+    model = Model(base, offline, structure, drift, None if offline else pointer.Pointer.detect())
     try:
         locale.setlocale(locale.LC_ALL, "")
     except locale.Error:

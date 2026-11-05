@@ -80,11 +80,29 @@ def test_apply_reports_progress_from_reading_through_verifying(state, monkeypatc
     seen = []
     assert burst.apply([patch_polling(1000)], progress=lambda label, frac: seen.append((label, frac)))
     labels = list(dict.fromkeys(label for label, _ in seen))
-    assert labels == ["Reading", "Writing", "Verifying"]
+    assert labels == ["Reading", "Writing", "Verifying, settings are live"]
     fractions = [frac for _, frac in seen]
     assert fractions == sorted(fractions)
     assert 0 <= fractions[0] < 0.1
     assert fractions[-1] == pytest.approx(1.0)
+
+
+def test_apply_returns_the_verified_read_back(state, monkeypatch):
+    mem = full_image()
+    install_fake(monkeypatch, mem)
+    result = burst.apply([patch_polling(1000)])
+    assert result
+    assert result.image == {a: mem[a] for a in range(burst.IMAGE_SIZE)}
+    assert image.get_polling(result.image) == 1000
+
+
+def test_a_refused_apply_is_false_and_holds_no_image(state, monkeypatch):
+    mem = full_image()
+    install_fake(monkeypatch, mem)
+    burst.save_last_good({**{a: mem[a] for a in range(burst.IMAGE_SIZE)}, 0x20: mem[0x20] ^ 0xFF})
+    result = burst.apply([patch_polling(250)])
+    assert not result
+    assert result.image is None
 
 
 def test_apply_sends_nothing_when_nothing_changes(state, monkeypatch, capsys):

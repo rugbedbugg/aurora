@@ -9,7 +9,7 @@ Aurora is not affiliated with EvoFox or Amkette.
 ## What it does
 
 - **`aurora`** is a command line tool. `aurora get` shows the settings. `aurora set KEY=VALUE ...` changes them in one burst.
-- **`aurora-tui`** is a terminal interface laid out like the vendor app and styled like rmpc. It has Button, Macro, Performance and Backlight tabs. Each tab is a set of bordered panes. The profile buttons, Apply and Cancel run along the bottom. A header shows the polling rate, the active DPI and the effect. It needs an 80x24 terminal and uses your terminal's own colours.
+- **`aurora-tui`** is a terminal interface laid out like the vendor app and styled like rmpc. It has Button, Macro, Performance and Backlight tabs. The profile buttons, Apply and Cancel run along the bottom. The panes fill the terminal and re-flow when it is resized. From 100x30 up it shows a large AURORA banner and splits every tab. Settings take the left 60%. The right 40% is a read-only preview of the config as TOML. A pending change shows in place as a red old line and a green new line. On the Button tab a tall terminal adds a System section with your OS logo and machine facts above the button list. It also shows a drawing of the mouse above the preview. Below 100x30 it uses a compact layout with a one-row header and no preview. It needs at least 80x24. Colour swatches grow with the window. They use the 256 colour cube when the terminal has one. The rest of the interface uses your terminal's own colours. Inside Hyprland the Performance tab sets Mouse Sensitivity and Scroll Speed for the mouse. These two apply at once and reset when Hyprland reloads. Elsewhere they stay read-only placeholders.
 
 You can change:
 
@@ -60,6 +60,7 @@ The keys follow rmpc. `?` shows the full list.
 - `h j k l` or the arrow keys move to the nearest control. `Enter` opens a list, toggles or presses a button.
 - `+` and `-` adjust a slider. `s` makes the selected DPI stage the active one.
 - `Tab`, `1` to `4` and `gt` / `gT` change tab. `gg` and `G` jump to the first and last control.
+- `PgUp` and `PgDn` scroll the config preview. `Ctrl-U` and `Ctrl-D` scroll it by half a page.
 - `u` undoes the selected control. `x` undoes every pending change. `a` applies them.
 - `:` opens a command line. `:set polling=1000 dpi.6=7200` stages settings with the same names as `aurora set`. `:apply`, `:cancel`, `:reload`, `:tab NAME` and `:q` also work. `:q!` quits without asking.
 

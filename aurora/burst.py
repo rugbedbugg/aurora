@@ -142,6 +142,19 @@ def rebaseline():
     return True
 
 
+class Result:
+    """The outcome of apply. It is true when the settings were written and verified.
+
+    image holds the verified read-back of the device. It is None when nothing was verified.
+    """
+
+    def __init__(self, ok, image=None):
+        self.ok, self.image = ok, image
+
+    def __bool__(self):
+        return self.ok
+
+
 def phase(progress, label, lo, hi):
     """Return a progress(done, total) callback that reports label and a fraction between lo and hi."""
     if progress is None:
@@ -151,6 +164,7 @@ def phase(progress, label, lo, hi):
 
 def apply(patches=None, force=False, rewrite=False, progress=None):
     """Read the device, apply every patch to that one image, send one burst and verify by read-back.
+    Return a Result.
 
     Set rewrite to send the burst even when nothing changed. That clears a live lighting state.
     Call progress(label, fraction) while it reads, writes and verifies when progress is given.
@@ -162,22 +176,22 @@ def apply(patches=None, force=False, rewrite=False, progress=None):
         problems = validate_read(before, load_last_good())
         if problems and not force:
             print("refusing to write:", "; ".join(problems))
-            return False
+            return Result(False)
         img = dict(before)
         for patch in patches or []:
             patch(img)
         image.check_invariants(img)
         if img == before and not rewrite:
             print("device already matches the requested state, no burst sent")
-            return True
+            return Result(True, before)
         try:
             replay(dev, template, img, phase(progress, "Writing", 0.41, 0.59))
         except (OSError, device.DeviceError) as exc:
             print(f"burst failed: {exc}")
             dev.close()
             recover(template, before)
-            return False
-        after = read_image(dev, phase(progress, "Verifying", 0.59, 1.0))
+            return Result(False)
+        after = read_image(dev, phase(progress, "Verifying, settings are live", 0.59, 1.0))
         status = dev.status()
     finally:
         try:
@@ -195,12 +209,12 @@ def apply(patches=None, force=False, rewrite=False, progress=None):
         [hex(a) for a in stray] or "none",
     )
     if wrong or stray:
-        return False
+        return Result(False)
     if rewrite:
         effect = image.get_led_effect(img)
         # Compare only the high nibble. The config verified already. Only the live effect is in doubt.
         if effect is not None and status[7] >> 4 != effect & 0x0F:
             print(f"live effect is not the stored one, status byte 7 is {status[7]:02x}, run rewrite again")
-            return False
+            return Result(False)
     save_last_good(after)
-    return True
+    return Result(True, after)
