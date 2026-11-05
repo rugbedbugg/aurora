@@ -14,6 +14,7 @@ from importlib import resources
 from aurora import device, image
 
 MIN_GAP = 0.003
+PROGRESS_EVERY = 32
 IMAGE_SIZE = 0x2D0
 MAGIC_PAGE0 = bytes([0x5A, 0x03, 0xA5, 0x40, 0x14, 0xFA, 0x30, 0x10])
 
@@ -62,12 +63,17 @@ def build(template, img):
     return out
 
 
-def replay(dev, template, img):
-    """Send one burst. Block SIGINT and SIGTERM until it ends so it cannot stop halfway."""
+def replay(dev, template, img, progress=None):
+    """Send one burst. Block SIGINT and SIGTERM until it ends so it cannot stop halfway.
+
+    Call progress(done, total) every few reports when it is given.
+    """
     reports = build(template, img)
     blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
     try:
-        for gap, report in reports:
+        for i, (gap, report) in enumerate(reports):
+            if progress is not None and i % PROGRESS_EVERY == 0:
+                progress(i, len(reports))
             time.sleep(max(gap, MIN_GAP))
             if report is None:
                 dev.get_report()
@@ -75,11 +81,13 @@ def replay(dev, template, img):
                 dev.set_report(report)
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+    if progress is not None:
+        progress(len(reports), len(reports))
     dev.stale = True
 
 
-def read_image(dev):
-    data = dev.read_range(0x000, IMAGE_SIZE)
+def read_image(dev, progress=None):
+    data = dev.read_range(0x000, IMAGE_SIZE, progress)
     return {a: data[a] for a in range(len(data))}
 
 
@@ -134,15 +142,23 @@ def rebaseline():
     return True
 
 
-def apply(patches=None, force=False, rewrite=False):
+def phase(progress, label, lo, hi):
+    """Return a progress(done, total) callback that reports label and a fraction between lo and hi."""
+    if progress is None:
+        return None
+    return lambda done, total: progress(label, lo + (hi - lo) * done / total)
+
+
+def apply(patches=None, force=False, rewrite=False, progress=None):
     """Read the device, apply every patch to that one image, send one burst and verify by read-back.
 
     Set rewrite to send the burst even when nothing changed. That clears a live lighting state.
+    Call progress(label, fraction) while it reads, writes and verifies when progress is given.
     """
     template = load_template()
     dev = device.Device()
     try:
-        before = read_image(dev)
+        before = read_image(dev, phase(progress, "Reading", 0.0, 0.41))
         problems = validate_read(before, load_last_good())
         if problems and not force:
             print("refusing to write:", "; ".join(problems))
@@ -155,13 +171,13 @@ def apply(patches=None, force=False, rewrite=False):
             print("device already matches the requested state, no burst sent")
             return True
         try:
-            replay(dev, template, img)
+            replay(dev, template, img, phase(progress, "Writing", 0.41, 0.59))
         except (OSError, device.DeviceError) as exc:
             print(f"burst failed: {exc}")
             dev.close()
             recover(template, before)
             return False
-        after = read_image(dev)
+        after = read_image(dev, phase(progress, "Verifying", 0.59, 1.0))
         status = dev.status()
     finally:
         try:

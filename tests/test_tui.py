@@ -179,7 +179,7 @@ def test_a_colour_edit_round_trips(tabs, model):
         for w in (w for w in widgets if w.kind == "swatch"):
             before = w.rgb[0](model.work)
             rgb = tuple((c + 1) % 16 for c in before)
-            assert model.change(tui.Edit(w.key, w.rgb[0], lambda im, w=w, rgb=rgb: w.rgb[1](im, rgb)))
+            assert model.change(tui.Edit(w.key, lambda im, w=w, rgb=rgb: w.rgb[1](im, rgb)))
             assert w.rgb[0](model.work) == rgb
             model.undo(w.key)
             assert w.rgb[0](model.work) == before
@@ -226,3 +226,106 @@ def test_reset_adopts_a_new_base(model):
     model.reset(new)
     assert image.get_polling(model.work) == 125
     assert not model.pending
+
+
+def test_every_control_sits_inside_a_pane_with_its_gutter_column(tabs):
+    for name, widgets in tabs.items():
+        panes = [*tui.PANES[name], tui.ACTION_PANE]
+        for w in widgets:
+            if w.y == 2:
+                continue
+            gutter = 0 if w.kind == "label" else 1
+            inside = any(
+                p.y < w.y < p.y + p.h - 1 and p.x < w.x - gutter and w.x + w.w - 1 < p.x + p.w - 1
+                for p in panes
+            )
+            assert inside, (name, w.key, w.text, w.y, w.x, w.w)
+
+
+def test_the_mouse_drawing_sits_inside_its_pane():
+    width = max(len(line) for line in tui.ART)
+    for name, x in (("Button", 30), ("Backlight", 6)):
+        pane = next(p for p in tui.PANES[name] if p.title == "Blaze")
+        assert pane.x < x and x + width - 1 < pane.x + pane.w - 1
+        assert pane.y < 4 and 4 + len(tui.ART) - 1 < pane.y + pane.h - 1
+
+
+def test_the_panes_of_a_tab_do_not_overlap():
+    for panes in tui.PANES.values():
+        cells = set()
+        for p in panes:
+            for y in range(p.y, p.y + p.h):
+                for x in range(p.x, p.x + p.w):
+                    assert (y, x) not in cells
+                    cells.add((y, x))
+
+
+def test_the_header_summary_reads_the_working_image(model):
+    assert tui.summary(model.work) == "500 Hz | 1200 DPI | Neon"
+    model.change(tui.Edit("polling", lambda im: image.set_polling(im, 125)))
+    assert tui.summary(model.work).startswith("125 Hz")
+
+
+def test_set_commands_become_edits_under_the_widget_keys(model):
+    command = tui.parse_command("set polling=1000 dpi.6=7200 button.8=rapid-fire")
+    assert command.action == "set"
+    assert [e.key for e in command.edits] == ["polling", "dpi.6", "button.8"]
+    for edit in command.edits:
+        assert model.change(edit)
+    assert image.get_polling(model.work) == 1000
+    assert image.get_dpi_index(model.work, 5) == 16
+    assert list(model.pending) == ["polling", "dpi.6", "button.8"]
+
+
+def test_a_widget_edit_replaces_a_command_edit_with_the_same_key(tabs, model):
+    for edit in tui.parse_command("set polling=125").edits:
+        model.change(edit)
+    choice = next(w for w in tabs["Performance"] if w.key == "polling" and w.text == "250")
+    model.change(choice.choose(model.work))
+    assert list(model.pending) == ["polling"]
+    assert image.get_polling(model.work) == 250
+    back = next(w for w in tabs["Performance"] if w.key == "polling" and w.text == "500")
+    model.change(back.choose(model.work))
+    assert not model.pending
+
+
+def test_bad_commands_are_refused_with_a_reason():
+    for text in ("set", "set dpi.1=3000", "set button.4=macro", "frobnicate", "tab", "tab nowhere", "tab b"):
+        with pytest.raises(tui.CommandError):
+            tui.parse_command(text)
+
+
+def test_the_command_names_and_their_aliases():
+    for text, action in (
+        ("apply", "apply"),
+        ("w", "apply"),
+        ("cancel", "cancel"),
+        ("undo", "cancel"),
+        ("reload", "reload"),
+        ("rebaseline", "rebaseline"),
+        ("quit", "quit"),
+        ("q", "quit"),
+        ("quit!", "force-quit"),
+        ("q!", "force-quit"),
+        ("help", "help"),
+        ("", "none"),
+    ):
+        assert tui.parse_command(text).action == action
+
+
+def test_tabs_can_be_named_by_number_or_prefix():
+    assert tui.parse_command("tab 3").arg == 2
+    assert tui.parse_command("tab perf").arg == 2
+    assert tui.parse_command("tab Back").arg == 3
+
+
+def test_a_command_that_breaks_an_invariant_is_refused_by_the_model(model):
+    edit = tui.parse_command("set button.1=right").edits[0]
+    assert not model.change(edit)
+    assert "Left Click" in model.msg
+    assert not model.pending
+
+
+def test_the_footer_and_the_help_text_fit_the_canvas():
+    assert len(tui.FOOTER) <= 78
+    assert all(len(line) <= 70 for line in [*tui.KEYS, *tui.COMMANDS])

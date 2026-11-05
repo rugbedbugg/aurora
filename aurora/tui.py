@@ -1,12 +1,14 @@
-"""A curses front end for Aurora that follows the layout of the vendor app.
+"""A curses front end for Aurora. It is laid out like the vendor app and styled like rmpc.
 
-The screen is an 80x24 canvas. Every control has a fixed place on it. The arrow keys move
-the focus to the nearest control in that direction.
+The screen is an 80x24 canvas of bordered panes. Every control has a fixed place in a pane.
+The arrow keys and h, j, k and l move the focus to the nearest control in that direction.
 """
 
 import contextlib
 import curses
 import io
+import locale
+import os
 import sys
 from collections import OrderedDict, namedtuple
 
@@ -53,21 +55,37 @@ EFFECT_LABELS = [
     "LED Off",
 ]
 UNVERIFIED = "range unverified, only small values were seen"
-FOOTER = "Arrows move  Enter change  +/- adjust  Tab tab  a apply  ? keys  q quit"
+FOOTER = "hjkl move  Enter change  +/- adjust  Tab tab  : command  ? help  q quit"
 KEYS = [
-    "Arrows or h j k l   move to the nearest control",
+    "h j k l or arrows   move to the nearest control",
     "Enter or Space      open a list, toggle, select or press",
     "+ or = / -          adjust a slider by its step",
     "] / [               adjust a slider by 1",
-    "r g b / R G B       raise / lower a colour channel on a swatch",
     "s                   make the selected DPI stage the active one",
-    "Tab / Shift-Tab     next / previous tab (Shift-Tab needs a terminal that sends it)",
+    "Tab / Shift-Tab     next / previous tab",
+    "                    (Shift-Tab needs a terminal that sends it)",
+    "1 2 3 4             go to a tab",
+    "gt / gT             next / previous tab",
+    "gg / G              first / last control",
     "u                   undo the selected control",
     "x                   undo every pending change (same as Cancel)",
     "a                   apply the pending changes",
+    ":                   command line, for example :set polling=1000",
     "Ctrl-R              reload from the mouse",
     "!                   accept the device state as the last known good",
+    "?                   this help",
     "q                   quit",
+]
+COMMANDS = [
+    "set KEY=VALUE ...   stage settings, the same names as aurora set",
+    "apply  (or w)       apply the pending changes",
+    "cancel (or undo)    undo every pending change",
+    "reload              read the mouse again",
+    "rebaseline          accept the device state as the last known good",
+    "tab NAME or NUMBER  go to a tab",
+    "quit  (or q)        quit, asking first when changes are pending",
+    "quit! (or q!)       quit without asking",
+    "help                this list",
 ]
 ART = [
     r"      .--------.      ",
@@ -82,7 +100,21 @@ ART = [
     r"     '-._______.-'    ",
 ]
 
-Edit = namedtuple("Edit", "key value patch")
+Edit = namedtuple("Edit", "key patch")
+Pane = namedtuple("Pane", "y x h w title")
+Command = namedtuple("Command", "action edits arg")
+
+PANES = {
+    "Button": [
+        Pane(3, 1, 15, 26, "Buttons 1-4"),
+        Pane(3, 27, 15, 26, "Blaze"),
+        Pane(3, 53, 15, 26, "Buttons 5-8"),
+    ],
+    "Macro": [Pane(3, 1, 15, 78, "Macros")],
+    "Performance": [Pane(3, 1, 15, 37, "Mouse"), Pane(3, 38, 15, 41, "Polling and DPI")],
+    "Backlight": [Pane(3, 1, 15, 34, "Blaze"), Pane(3, 35, 15, 44, "Lighting")],
+}
+ACTION_PANE = Pane(18, 1, 4, 78, "")
 
 
 def clamp(value, lo, hi):
@@ -109,11 +141,14 @@ class Widget:
         self.hint = kw.get("hint", "")
         self.enabled = kw.get("enabled", True)
         self.dim = kw.get("dim", False)
-        self.bold = kw.get("bold", False)
 
     @property
     def focusable(self):
         return self.enabled and self.kind != "label"
+
+
+class CommandError(Exception):
+    pass
 
 
 class Model:
@@ -129,45 +164,39 @@ class Model:
         self.dpi_sel = 0
         self.msg = ""
 
-    def recompute(self):
-        self.work = dict(self.base)
-        for patch in self.pending.values():
-            patch(self.work)
+    def image_with(self, pending):
+        img = dict(self.base)
+        for patch in pending.values():
+            patch(img)
+        return img
 
     def change(self, edit):
         """Apply an edit to the working image. Return False and set a message if it is refused."""
-        before = edit.value(self.base)
-        previous = self.pending.get(edit.key)
-        self.pending[edit.key] = edit.patch
+        trial = OrderedDict(self.pending)
+        trial[edit.key] = edit.patch
         try:
-            self.recompute()
-            image.check_invariants(self.work)
+            work = self.image_with(trial)
+            image.check_invariants(work)
         except (ValueError, image.Unmapped) as exc:
-            if previous is None:
-                del self.pending[edit.key]
-            else:
-                self.pending[edit.key] = previous
-            self.recompute()
             self.msg = f"refused: {exc}"
             return False
-        if edit.value(self.work) == before:
-            del self.pending[edit.key]
-            self.recompute()
-        self.msg = ""
+        rest = OrderedDict((k, p) for k, p in trial.items() if k != edit.key)
+        if self.image_with(rest) == work:
+            del trial[edit.key]
+        self.pending, self.work, self.msg = trial, work, ""
         return True
 
     def undo(self, key):
         self.pending.pop(key, None)
-        self.recompute()
+        self.work = self.image_with(self.pending)
 
     def undo_all(self):
         self.pending.clear()
-        self.recompute()
+        self.work = dict(self.base)
 
     def reset(self, base):
         self.base = base
-        self.pending.clear()
-        self.recompute()
+        self.undo_all()
 
 
 def nearest(widgets, cur, direction):
@@ -235,17 +264,69 @@ def profile_of(img):
     return img[0x01] >> 5 & 3
 
 
+def summary(img):
+    """Return the one line the header shows: polling, active DPI and effect."""
+    hz = image.get_polling(img)
+    active = dpi_label(img[0x18] - 0x18)(img)
+    return f"{hz} Hz | {active} DPI | {effect_label(img)}"
+
+
+def parse_command(text):
+    """Parse one command line. Raise CommandError for text that is not a command."""
+    parts = text.split()
+    if not parts:
+        return Command("none", [], None)
+    name, args = parts[0], parts[1:]
+    if name == "set":
+        if not args:
+            raise CommandError("set needs KEY=VALUE")
+        edits = []
+        for arg in args:
+            try:
+                patch = cli.parse_setting(arg)
+            except (ValueError, KeyError, image.Unmapped) as exc:
+                raise CommandError(str(exc)) from exc
+            edits.append(Edit(arg.split("=", 1)[0], patch))
+        return Command("set", edits, None)
+    simple = {
+        "apply": "apply",
+        "w": "apply",
+        "cancel": "cancel",
+        "undo": "cancel",
+        "reload": "reload",
+        "rebaseline": "rebaseline",
+        "quit": "quit",
+        "q": "quit",
+        "quit!": "force-quit",
+        "q!": "force-quit",
+        "help": "help",
+    }
+    if name in simple:
+        return Command(simple[name], [], None)
+    if name == "tab":
+        if len(args) != 1:
+            raise CommandError("tab needs a name or a number")
+        arg = args[0].lower()
+        if arg.isdigit() and 1 <= int(arg) <= len(TABS):
+            return Command("tab", [], int(arg) - 1)
+        matches = [i for i, t in enumerate(TABS) if t.lower().startswith(arg)]
+        if len(matches) == 1:
+            return Command("tab", [], matches[0])
+        raise CommandError(f"no tab {args[0]!r}")
+    raise CommandError(f"unknown command {name!r}")
+
+
 def tab_widgets():
-    spec = [("Button", 2), ("Macro", 13), ("Performance", 49), ("Backlight", 65)]
+    spec = [("Button", 2), ("Macro", 11), ("Performance", 19), ("Backlight", 33)]
     return [
-        Widget("tab", f"tab.{name}", 1, x, len(name) + 4, text=name, index=i, hint="Enter opens the tab")
+        Widget("tab", f"tab.{name}", 2, x, len(name) + 2, text=name, index=i, hint="Enter opens the tab")
         for i, (name, x) in enumerate(spec)
     ]
 
 
 def footer_widgets():
     widgets = []
-    x = 2
+    x = 3
     for i, name in enumerate(PROFILE_NAMES):
         w = len(name) + 4
         widgets.append(
@@ -257,7 +338,7 @@ def footer_widgets():
                 w,
                 text=name,
                 selected=lambda img, i=i: profile_of(img) == i,
-                choose=lambda img, i=i: Edit("profile", profile_of, lambda im: image.set_profile(im, i)),
+                choose=lambda img, i=i: Edit("profile", lambda im: image.set_profile(im, i)),
                 hint="the Button tab edits the Office table only",
             )
         )
@@ -268,7 +349,7 @@ def footer_widgets():
     widgets.append(
         Widget("action", "cancel", 19, 67, 10, text="Cancel", action="cancel", hint="undo every change")
     )
-    for text, x, w in (("Import", 2, 10), ("Export", 13, 10), ("Reset", 24, 9)):
+    for text, x, w in (("Import", 3, 10), ("Export", 14, 10), ("Reset", 25, 9)):
         widgets.append(Widget("action", text.lower(), 20, x, w, text=text, enabled=False))
     return widgets
 
@@ -279,12 +360,12 @@ def button_widgets():
         left = n <= 4
         y = 5 + 3 * ((n - 1) % 4)
         number_x, box_x = (3, 5) if left else (55, 57)
-        widgets.append(Widget("label", None, y, number_x, 1, text=str(n), bold=True))
+        widgets.append(Widget("label", None, y, number_x, 1, text=str(n)))
 
         def options(img, n=n):
-            key, value = f"button.{n}", button_label(n)
+            key = f"button.{n}"
             return [
-                (FUNCTION_LABELS[name], Edit(key, value, lambda im, f=function: image.set_button(im, n, f)))
+                (FUNCTION_LABELS[name], Edit(key, lambda im, f=function: image.set_button(im, n, f)))
                 for name, function in cli.FUNCTIONS.items()
             ]
 
@@ -308,21 +389,19 @@ def button_widgets():
 def performance_widgets(model):
     widgets = [
         Widget("label", None, 4, 3, 17, text="Mouse Sensitivity", dim=True),
-        Widget("label", None, 5, 3, 36, text="[-----------o------]  set by the OS", dim=True),
+        Widget("label", None, 5, 3, 31, text="[-----------o------]  set by OS", dim=True),
         Widget("label", None, 7, 3, 12, text="Scroll Speed", dim=True),
-        Widget("label", None, 8, 3, 36, text="[-----------o------]  set by the OS", dim=True),
+        Widget("label", None, 8, 3, 31, text="[-----------o------]  set by OS", dim=True),
         Widget("label", None, 10, 3, 18, text="Double Click Speed"),
         Widget(
             "slider",
             "fire-time",
             11,
             3,
-            34,
-            value=lambda img: str(fire_time(img)),
+            32,
             bar=lambda img: (fire_time(img), 0, 300, f"{fire_time(img)} / 300ms"),
             adjust=lambda img, d, fine: Edit(
                 "fire-time",
-                lambda im: str(fire_time(im)),
                 (lambda ms: lambda im: image.set_fire_time(im, ms))(
                     clamp(fire_time(img) + d * (1 if fine else 10), 0, 300)
                 ),
@@ -343,9 +422,7 @@ def performance_widgets(model):
                 w,
                 text=str(hz),
                 selected=lambda img, hz=hz: image.get_polling(img) == hz,
-                choose=lambda img, hz=hz: Edit(
-                    "polling", lambda im: str(image.get_polling(im)), lambda im: image.set_polling(im, hz)
-                ),
+                choose=lambda img, hz=hz: Edit("polling", lambda im: image.set_polling(im, hz)),
             )
         )
         x += w + 2
@@ -360,10 +437,8 @@ def performance_widgets(model):
                 8,
                 x,
                 3,
-                value=lambda img, n=n: "on" if img[0x19] >> n & 1 else "off",
                 toggle=lambda img, n=n: Edit(
                     f"dpi-enable.{n + 1}",
-                    lambda im: "on" if im[0x19] >> n & 1 else "off",
                     (lambda on: lambda im: image.set_dpi_enabled(im, n, on))(not img[0x19] >> n & 1),
                 ),
                 selected=lambda img, n=n: bool(img[0x19] >> n & 1),
@@ -374,7 +449,7 @@ def performance_widgets(model):
 
         def options(img, n=n, key=key):
             return [
-                (f"{label} DPI", Edit(key, dpi_label(n), lambda im, i=index: image.set_dpi_stage(im, n, i)))
+                (f"{label} DPI", Edit(key, lambda im, i=index: image.set_dpi_stage(im, n, i)))
                 for index, label in sorted(image.DPI_LABEL.items())
             ]
 
@@ -402,8 +477,9 @@ def performance_widgets(model):
                     lambda img, n=n: image.get_dpi_colour(img, n),
                     lambda im, c, n=n: image.set_dpi_colour(im, n, *c),
                 ),
+                text=f"DPI stage {n + 1} colour",
                 stage=n,
-                hint="r/g/b raise, R/G/B lower. The vendor app shows stage pairs swapped",
+                hint="Enter edits the colour. The vendor app shows stage pairs swapped",
             )
         )
 
@@ -415,7 +491,7 @@ def performance_widgets(model):
 
     def dpi_adjust(img, d, fine):
         n = model.dpi_sel
-        return Edit(f"dpi.{n + 1}", dpi_label(n), dpi_step(n)(img, d, fine))
+        return Edit(f"dpi.{n + 1}", dpi_step(n)(img, d, fine))
 
     widgets.append(
         Widget(
@@ -424,7 +500,6 @@ def performance_widgets(model):
             13,
             41,
             36,
-            value=lambda img: dpi_label(model.dpi_sel)(img),
             bar=dpi_bar,
             adjust=dpi_adjust,
             hint="+/- changes the selected stage, s makes it the active stage",
@@ -444,7 +519,7 @@ def backlight_widgets():
             30,
             value=effect_label,
             options=lambda img: [
-                (name, Edit("effect", effect_label, lambda im, i=i: image.set_led_effect(im, i)))
+                (name, Edit("effect", lambda im, i=i: image.set_led_effect(im, i)))
                 for i, name in enumerate(EFFECT_LABELS)
             ],
             hint="Enter lists the effects",
@@ -464,7 +539,8 @@ def backlight_widgets():
                     lambda img, n=n: image.get_led_colour(img, n),
                     lambda im, c, n=n: image.set_led_colour(im, n, *c),
                 ),
-                hint="r/g/b raise, R/G/B lower, 0 to 15",
+                text=f"Cycle colour {n + 1}",
+                hint="Enter edits the colour",
             )
         )
         widgets.append(
@@ -474,10 +550,8 @@ def backlight_widgets():
                 8,
                 x,
                 3,
-                value=lambda img, n=n: "on" if image.get_cycle_colour_enabled(img, n) else "off",
                 toggle=lambda img, n=n: Edit(
                     f"cycle-colour.{n}",
-                    lambda im: "on" if image.get_cycle_colour_enabled(im, n) else "off",
                     (lambda on: lambda im: image.set_cycle_colour_enabled(im, n, on))(
                         not image.get_cycle_colour_enabled(img, n)
                     ),
@@ -494,11 +568,9 @@ def backlight_widgets():
             10,
             50,
             26,
-            value=lambda img: str(img[0x3F] >> 4),
             bar=lambda img: (img[0x3F] >> 4, 0, 15, str(img[0x3F] >> 4)),
             adjust=lambda img, d, fine: Edit(
                 "brightness",
-                lambda im: str(im[0x3F] >> 4),
                 (lambda v: lambda im: image.set_brightness(im, v))(clamp((img[0x3F] >> 4) + d, 0, 15)),
             ),
             hint=UNVERIFIED,
@@ -510,7 +582,6 @@ def backlight_widgets():
             11,
             50,
             26,
-            value=lambda img: str(image.get_led_cycle_time(img)),
             bar=lambda img: (
                 image.get_led_cycle_time(img) or 0,
                 0,
@@ -522,7 +593,6 @@ def backlight_widgets():
                 if image.get_led_cycle_time(img) is None
                 else Edit(
                     "cycle-time",
-                    lambda im: str(image.get_led_cycle_time(im)),
                     (lambda v: lambda im: image.set_led_cycle_time(im, v))(
                         clamp(image.get_led_cycle_time(img) + d, 0, 15)
                     ),
@@ -537,10 +607,8 @@ def backlight_widgets():
             38,
             14,
             text="Symmetry",
-            value=lambda img: "on" if img[0x3A] >> 6 & 1 else "off",
             toggle=lambda img: Edit(
                 "symmetry",
-                lambda im: "on" if im[0x3A] >> 6 & 1 else "off",
                 (lambda on: lambda im: image.set_led_symmetry(im, on))(not img[0x3A] >> 6 & 1),
             ),
             selected=lambda img: bool(img[0x3A] >> 6 & 1),
@@ -563,22 +631,33 @@ def build_widgets(model):
     }
 
 
-def read_device():
+def read_device(progress=None):
     dev = device.Device()
     try:
-        return burst.read_image(dev)
+        return burst.read_image(dev, progress)
     finally:
         dev.close()
 
 
+def wants_unicode():
+    """Return True when the terminal can show the box and block characters."""
+    return (
+        locale.getpreferredencoding(False).lower().replace("-", "") == "utf8"
+        and os.environ.get("TERM") != "linux"
+    )
+
+
 class Screen:
-    def __init__(self, scr, model):
+    def __init__(self, scr, model, square=False):
         self.scr, self.model = scr, model
         self.tabs = build_widgets(model)
         self.tab = 0
         self.focus = self.first_body()
         self.colours = False
         self.pairs = {}
+        self.unicode = wants_unicode()
+        self.rounded = self.unicode and not square
+        self.accent = self.current = self.mark = 0
         self.oy = self.ox = 0
         curses.set_escdelay(25)
         try:
@@ -600,17 +679,31 @@ class Screen:
                 for i, color in enumerate(names, 1):
                     curses.init_pair(i, -1, color)
                     self.pairs[color] = i
+                curses.init_pair(8, curses.COLOR_BLUE, -1)
+                curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_BLUE)
+                curses.init_pair(10, curses.COLOR_YELLOW, -1)
                 self.colours = True
         except curses.error:
             self.colours = False
+        if self.colours:
+            self.accent = curses.color_pair(8)
+            self.current = curses.color_pair(9) | curses.A_BOLD
+            self.mark = curses.color_pair(10) | curses.A_BOLD
+        else:
+            self.current = curses.A_REVERSE | curses.A_BOLD
+            self.mark = curses.A_BOLD
 
     @property
     def widgets(self):
         return self.tabs[TABS[self.tab]]
 
     def first_body(self):
-        body = [w for w in self.widgets if w.focusable and w.y >= 3 and w.y < 18]
-        return min(body, key=lambda w: (w.y, w.x)) if body else self.widgets[0]
+        body = self.body()
+        return body[0] if body else self.widgets[0]
+
+    def body(self):
+        found = [w for w in self.widgets if w.focusable and 3 < w.y < 18]
+        return sorted(found, key=lambda w: (w.y, w.x))
 
     def put(self, y, x, text, attr=0):
         h, w = self.scr.getmaxyx()
@@ -623,29 +716,41 @@ class Screen:
 
     def line(self, y, x, n):
         try:
-            self.scr.hline(y + self.oy, x + self.ox, curses.ACS_HLINE, n)
+            self.scr.hline(y + self.oy, x + self.ox, curses.ACS_HLINE, n, self.accent)
         except curses.error:
             pass
 
-    def box(self, y, x, h, w):
-        for yy in range(y + 1, y + h - 1):
-            for xx in (x, x + w - 1):
+    def box(self, y, x, h, w, title="", right=False):
+        """Draw a pane border with the title set into the top edge."""
+        if self.unicode:
+            tl, tr, bl, br = ("╭", "╮", "╰", "╯") if self.rounded else ("┌", "┐", "└", "┘")
+            self.put(y, x, tl + "─" * (w - 2) + tr, self.accent)
+            self.put(y + h - 1, x, bl + "─" * (w - 2) + br, self.accent)
+            for yy in range(y + 1, y + h - 1):
+                self.put(yy, x, "│", self.accent)
+                self.put(yy, x + w - 1, "│", self.accent)
+        else:
+            for yy in range(y + 1, y + h - 1):
+                for xx in (x, x + w - 1):
+                    try:
+                        self.scr.addch(yy + self.oy, xx + self.ox, curses.ACS_VLINE, self.accent)
+                    except curses.error:
+                        pass
+            self.line(y, x + 1, w - 2)
+            self.line(y + h - 1, x + 1, w - 2)
+            for yy, xx, ch in (
+                (y, x, curses.ACS_ULCORNER),
+                (y, x + w - 1, curses.ACS_URCORNER),
+                (y + h - 1, x, curses.ACS_LLCORNER),
+                (y + h - 1, x + w - 1, curses.ACS_LRCORNER),
+            ):
                 try:
-                    self.scr.addch(yy + self.oy, xx + self.ox, curses.ACS_VLINE)
+                    self.scr.addch(yy + self.oy, xx + self.ox, ch, self.accent)
                 except curses.error:
                     pass
-        self.line(y, x + 1, w - 2)
-        self.line(y + h - 1, x + 1, w - 2)
-        for yy, xx, ch in (
-            (y, x, curses.ACS_ULCORNER),
-            (y, x + w - 1, curses.ACS_URCORNER),
-            (y + h - 1, x, curses.ACS_LLCORNER),
-            (y + h - 1, x + w - 1, curses.ACS_LRCORNER),
-        ):
-            try:
-                self.scr.addch(yy + self.oy, xx + self.ox, ch)
-            except curses.error:
-                pass
+        if title:
+            title = title[: w - 8]
+            self.put(y, x + w - len(title) - 4 if right else x + 2, f" {title} ")
 
     def swatch(self, rgb):
         on = tuple(1 if c >= 8 else 0 for c in rgb)
@@ -675,19 +780,16 @@ class Screen:
         work = self.model.work
         focused = w is self.focus
         attr = curses.A_DIM if not w.enabled or w.dim else 0
-        if w.bold:
-            attr |= curses.A_BOLD
         if focused:
-            attr |= curses.A_REVERSE
-        dirty = self.dirty(w)
-        if dirty:
-            attr |= curses.A_BOLD
-            self.put(w.y, w.x - 1, "*", curses.A_BOLD)
+            attr = self.current
+        if self.dirty(w):
+            self.put(w.y, w.x - 1, "*", self.mark)
         if w.kind == "label":
             self.put(w.y, w.x, w.text, attr)
         elif w.kind == "tab":
-            current = self.tab == w.index
-            self.put(w.y, w.x, f"[ {w.text} ]", attr | (curses.A_BOLD if current else 0))
+            active = self.tab == w.index
+            style = self.current if active else attr
+            self.put(w.y, w.x, f" {w.text} ", style | (curses.A_UNDERLINE if focused and not active else 0))
         elif w.kind == "pick":
             text = w.value(work)
             s = f"[{text:<{w.w - 3}}v]" if w.w >= 12 else text.ljust(w.w)
@@ -697,30 +799,57 @@ class Screen:
             self.put(w.y, w.x, f"[{'x' if on else ' '}]" + (f" {w.text}" if w.text else ""), attr)
         elif w.kind == "choice":
             on = w.selected(work)
-            self.put(w.y, w.x, f"({'o' if on else ' '}) {w.text}", attr | (curses.A_BOLD if on else 0))
+            self.put(w.y, w.x, f"({'o' if on else ' '}) {w.text}", attr)
         elif w.kind == "action":
             self.put(w.y, w.x, f"[ {w.text} ]", attr)
         elif w.kind == "slider":
             cur, lo, hi, text = w.bar(work)
             bw = w.w - len(text) - 3
             k = round((cur - lo) / (hi - lo) * (bw - 1)) if hi > lo else 0
-            self.put(w.y, w.x, "[" + "=" * k + "o" + "-" * (bw - 1 - k) + "] " + text, attr)
+            full, empty = ("█", " ") if self.unicode else ("=", "-")
+            self.put(w.y, w.x, "[", attr)
+            self.put(w.y, w.x + 1, full * k, self.accent)
+            self.put(w.y, w.x + 1 + k, "█" if self.unicode else "o", self.accent)
+            self.put(w.y, w.x + 2 + k, empty * (bw - 1 - k) + "] " + text, attr)
         elif w.kind == "swatch":
             text, sattr = self.swatch(w.rgb[0](work))
             if focused:
-                self.put(w.y, w.x - 1, "[", curses.A_REVERSE)
-                self.put(w.y, w.x + 4, "]", curses.A_REVERSE)
-            self.put(w.y, w.x, text, sattr | (curses.A_BOLD if dirty else 0))
+                self.put(w.y, w.x - 1, "[", self.current)
+                self.put(w.y, w.x + 4, "]", self.current)
+            self.put(w.y, w.x, text, sattr)
 
     def draw_art(self, x, numbers):
         for y, line in enumerate(ART):
-            self.put(4 + y, x, "".join(" " if c.isdigit() else c for c in line))
+            self.put(4 + y, x, "".join(" " if c.isdigit() else c for c in line), self.accent)
         for y, line in enumerate(ART if numbers else []):
             for dx, c in enumerate(line):
                 if c.isdigit():
-                    key = f"button.{c}"
-                    on = self.focus.key == key
-                    self.put(4 + y, x + dx, c, curses.A_REVERSE if on else curses.A_BOLD)
+                    on = self.focus.key == f"button.{c}"
+                    self.put(4 + y, x + dx, c, self.current if on else 0)
+
+    def draw_header(self):
+        model = self.model
+        flags = ("[offline]" if model.offline else "") + (" [read only]" if model.structure else "")
+        self.put(0, 2, "Aurora", self.accent)
+        self.put(0, 34, "EvoFox Blaze")
+        profile = PROFILE_NAMES[profile_of(model.work)]
+        self.put(0, 77 - len(profile), profile, self.accent)
+        self.put(1, 2, summary(model.work), curses.A_DIM)
+        self.put(1, 77 - len(flags), flags.strip(), curses.A_DIM)
+
+    def draw_status(self):
+        model = self.model
+        if model.structure:
+            banner = "read looks wrong, writes disabled: " + "; ".join(model.structure)
+        elif model.drift:
+            banner = "differs from the last verified state, press ! to accept it"
+        else:
+            banner = ""
+        text = (model.msg or banner)[:60]
+        self.put(22, 2, text, curses.A_BOLD if model.msg else 0)
+        count = len(model.pending)
+        pending = f"{count} pending change{'s' if count != 1 else ''}"
+        self.put(22, 77 - len(pending), pending, self.mark if count else curses.A_DIM)
 
     def draw(self):
         self.scr.erase()
@@ -730,44 +859,41 @@ class Screen:
             self.scr.refresh()
             return
         self.oy, self.ox = (h - CANVAS_H) // 2, (w - CANVAS_W) // 2
-        model = self.model
-        flags = ("  [offline]" if model.offline else "") + ("  [read only]" if model.structure else "")
-        self.put(0, 2, "Aurora", curses.A_BOLD)
-        self.put(0, 32, "E V O F O X   B L A Z E", curses.A_BOLD)
-        self.put(0, 79 - len(flags), flags, curses.A_DIM)
-        self.line(2, 1, 78)
-        self.line(18, 1, 78)
         name = TABS[self.tab]
+        self.draw_header()
+        for pane in PANES[name]:
+            self.box(*pane)
+        hint = self.focus.hint
+        if self.focus.kind == "swatch":
+            r, g, b = self.focus.rgb[0](self.model.work)
+            hint = f"R {r} G {g} B {b}  " + hint
+        self.box(*ACTION_PANE[:4], title=hint[:68], right=True)
         if name == "Button":
             self.draw_art(30, True)
         elif name == "Macro":
             self.put(10, 26, "Macros are not supported yet", curses.A_DIM)
         elif name == "Backlight":
             self.draw_art(6, False)
-            self.box(3, 35, 15, 44)
         else:
-            active = model.work[0x18] - 0x18
-            self.put(11, 41 + 6 * active + 2, "^", curses.A_BOLD)
-        for w in self.widgets:
-            self.draw_widget(w)
-        if name == "Button" and profile_of(model.work):
-            self.put(17, 3, "The active profile is not Office. These buttons are not in use.", curses.A_BOLD)
-        hint = self.focus.hint
-        if self.focus.kind == "swatch":
-            r, g, b = self.focus.rgb[0](model.work)
-            hint = f"R {r}  G {g}  B {b}   " + hint
-        self.put(21, 2, hint, curses.A_DIM)
-        count = len(model.pending)
-        text = f"{count} pending change{'s' if count != 1 else ''}"
-        self.put(20, 79 - len(text), text, curses.A_BOLD if count else curses.A_DIM)
-        if model.structure:
-            banner = "the device read looks wrong, writes are disabled: " + "; ".join(model.structure)
-        elif model.drift:
-            banner = "the device differs from the last verified state, press ! to accept it"
-        else:
-            banner = ""
-        self.put(22, 2, model.msg or banner, curses.A_BOLD)
+            active = self.model.work[0x18] - 0x18
+            self.put(11, 41 + 6 * active + 2, "▲" if self.unicode else "^", self.accent)
+        for widget in self.widgets:
+            self.draw_widget(widget)
+        if name == "Button" and profile_of(self.model.work):
+            self.put(17, 3, " not Office: these buttons are not in use ", self.mark)
+        self.draw_status()
         self.put(23, 2, FOOTER, curses.A_DIM)
+        self.scr.refresh()
+
+    def draw_progress(self, label, frac):
+        """Draw a progress bar on the status row. The writer calls this while it works."""
+        full = "█" if self.unicode else "#"
+        room = 70 - len(label)
+        k = int(room * clamp(frac, 0, 1))
+        self.put(22, 0, " " * 79)
+        self.put(22, 2, label, self.accent)
+        self.put(22, 4 + len(label), full * k, self.accent)
+        self.put(22, 74, f"{int(frac * 100):3d}%", curses.A_DIM)
         self.scr.refresh()
 
     def say(self, text):
@@ -785,8 +911,8 @@ class Screen:
 
     def popup(self, title, labels, current):
         """Show a list over the canvas. Return the chosen index. Return None if it is cancelled."""
-        height = min(len(labels), 14)
-        width = max(len(s) for s in [*labels, title]) + 6
+        height = min(len(labels), 12)
+        width = max(len(s) for s in [*labels, title]) + 7
         y0, x0 = (CANVAS_H - height - 2) // 2, (CANVAS_W - width) // 2
         sel = current if current is not None else 0
         top = 0
@@ -794,11 +920,12 @@ class Screen:
             top = clamp(top, max(0, sel - height + 1), min(sel, max(0, len(labels) - height)))
             for yy in range(y0, y0 + height + 2):
                 self.put(yy, x0, " " * width)
-            self.box(y0, x0, height + 2, width)
-            self.put(y0, x0 + 2, f" {title} ", curses.A_BOLD)
+            self.box(y0, x0, height + 2, width, title)
             for i in range(height):
                 j = top + i
-                self.put(y0 + 1 + i, x0 + 2, labels[j].ljust(width - 4), curses.A_REVERSE if j == sel else 0)
+                self.put(y0 + 1 + i, x0 + 2, labels[j].ljust(width - 6), self.current if j == sel else 0)
+            if len(labels) > height:
+                self.draw_scrollbar(y0 + 1, x0 + width - 3, height, top, len(labels))
             self.scr.refresh()
             key = self.scr.getch()
             if key in (curses.KEY_DOWN, ord("j")):
@@ -814,14 +941,103 @@ class Screen:
             elif key in (27, ord("q")):
                 return None
 
-    def overlay(self):
-        self.scr.erase()
-        self.put(0, 2, "Keys", curses.A_BOLD)
-        for i, line in enumerate(KEYS):
-            self.put(2 + i, 2, line)
-        self.put(3 + len(KEYS), 2, "Press any key to go back.", curses.A_DIM)
-        self.scr.refresh()
-        self.scr.getch()
+    def draw_scrollbar(self, y, x, height, top, total):
+        """Draw a scrollbar with a thumb sized to the visible share of the list."""
+        track, thumb, up, down = ("│", "█", "▲", "▼") if self.unicode else ("|", "#", "^", "v")
+        size = max(1, round(height * height / total))
+        start = round((height - size) * top / max(1, total - height))
+        for i in range(height):
+            on = start <= i < start + size
+            self.put(y + i, x, thumb if on else track, self.accent if on else 0)
+        self.put(y, x, up, self.accent)
+        self.put(y + height - 1, x, down, self.accent)
+
+    def colour_modal(self, w):
+        """Edit the red, green and blue values of a swatch. Return True when the edit was confirmed."""
+        rgb = list(w.rgb[0](self.model.work))
+        channel = 0
+        y0, x0, width = 8, 24, 32
+        while True:
+            for yy in range(y0, y0 + 7):
+                self.put(yy, x0, " " * width)
+            self.box(y0, x0, 7, width, w.text or "Colour")
+            full = "█" if self.unicode else "#"
+            for i, name in enumerate("RGB"):
+                row = y0 + 1 + i
+                bar = full * rgb[i] + " " * (15 - rgb[i])
+                self.put(row, x0 + 2, f"{name} ", self.current if i == channel else 0)
+                self.put(row, x0 + 5, bar, self.accent)
+                self.put(row, x0 + 22, f"{rgb[i]:>2}")
+            text, sattr = self.swatch(tuple(rgb))
+            self.put(y0 + 4, x0 + 5, text, sattr)
+            self.put(y0 + 5, x0 + 2, "j/k channel  +/- value  Enter ok", curses.A_DIM)
+            self.scr.refresh()
+            key = self.scr.getch()
+            if key in (curses.KEY_DOWN, ord("j")):
+                channel = (channel + 1) % 3
+            elif key in (curses.KEY_UP, ord("k")):
+                channel = (channel - 1) % 3
+            elif key in (curses.KEY_RIGHT, ord("l"), ord("+"), ord("=")):
+                rgb[channel] = min(15, rgb[channel] + 1)
+            elif key in (curses.KEY_LEFT, ord("h"), ord("-")):
+                rgb[channel] = max(0, rgb[channel] - 1)
+            elif key in (10, 13, curses.KEY_ENTER):
+                chosen = tuple(rgb)
+                return self.model.change(Edit(w.key, lambda im, c=chosen: w.rgb[1](im, c)))
+            elif key in (27, ord("q")):
+                return False
+
+    def help_modal(self):
+        self.popup("Help", KEYS + ["", "Commands (press : first)", *COMMANDS], None)
+
+    def command_line(self):
+        """Read a command on the status row. Return the text, or None if it is cancelled."""
+        text = ""
+        while True:
+            self.put(22, 0, " " * 79)
+            self.put(22, 2, ":" + text + "_", self.accent)
+            self.scr.refresh()
+            key = self.scr.getch()
+            if key in (10, 13, curses.KEY_ENTER):
+                return text
+            if key == 27:
+                return None
+            if key in (curses.KEY_BACKSPACE, 127, 8):
+                if not text:
+                    return None
+                text = text[:-1]
+            elif 32 <= key < 127 and len(text) < 70:
+                text += chr(key)
+
+    def run_command(self, text):
+        """Run one command. Return False when the program should quit."""
+        model = self.model
+        try:
+            command = parse_command(text)
+        except CommandError as exc:
+            model.msg = str(exc)
+            return True
+        if command.action == "set":
+            for edit in command.edits:
+                if not model.change(edit):
+                    break
+        elif command.action == "apply":
+            self.apply()
+        elif command.action == "cancel":
+            model.undo_all()
+        elif command.action == "reload":
+            self.reload()
+        elif command.action == "rebaseline":
+            self.accept()
+        elif command.action == "tab":
+            self.switch_tab(command.arg)
+        elif command.action == "help":
+            self.help_modal()
+        elif command.action == "force-quit":
+            return False
+        elif command.action == "quit":
+            return bool(model.pending) and not self.ask("Discard the pending changes and quit?")
+        return True
 
     def move(self, direction):
         target = nearest(self.widgets, self.focus, direction)
@@ -832,6 +1048,13 @@ class Screen:
             self.focus = target
             if target.stage is not None:
                 self.model.dpi_sel = target.stage
+
+    def jump(self, last):
+        body = self.body()
+        if body:
+            self.focus = body[-1] if last else body[0]
+            if self.focus.stage is not None:
+                self.model.dpi_sel = self.focus.stage
 
     def switch_tab(self, index):
         self.tab = index % len(TABS)
@@ -853,6 +1076,8 @@ class Screen:
                 model.change(options[choice][1])
         elif w.kind in ("toggle", "choice"):
             model.change((w.toggle or w.choose)(model.work))
+        elif w.kind == "swatch":
+            self.colour_modal(w)
         elif w.kind == "action" and w.action == "apply":
             self.apply()
         elif w.kind == "action" and w.action == "cancel":
@@ -867,27 +1092,19 @@ class Screen:
             if edit is not None:
                 self.model.change(edit)
 
-    def channel(self, index, d):
-        w = self.focus
-        if w.kind != "swatch":
-            return
-        rgb = list(w.rgb[0](self.model.work))
-        rgb[index] = (rgb[index] + d) % 16
-        rgb = tuple(rgb)
-        self.model.change(Edit(w.key, w.rgb[0], lambda im: w.rgb[1](im, rgb)))
-
     def make_active(self):
         w = self.focus
         if w.stage is None:
             return
         n = w.stage
-        value = lambda img: str(img[0x18] - 0x18 + 1)  # noqa: E731
-        self.model.change(Edit("dpi-active", value, lambda im: image.set_active_dpi_stage(im, n)))
+        self.model.change(Edit("dpi-active", lambda im: image.set_active_dpi_stage(im, n)))
 
     def reload(self):
-        self.say("Reading the mouse, about 7 seconds...")
         try:
-            img = image.load_sample() if self.model.offline else read_device()
+            if self.model.offline:
+                img = image.load_sample()
+            else:
+                img = read_device(lambda done, total: self.draw_progress("Reading", done / total))
         except Exception as exc:
             self.model.msg = f"read failed: {exc}"
             return False
@@ -910,11 +1127,10 @@ class Screen:
             model.reset(dict(model.work))
             model.msg = "offline: nothing was written"
             return
-        self.say("Writing and verifying, about 25 seconds. Do not unplug the mouse...")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             try:
-                ok = burst.apply(list(model.pending.values()), False)
+                ok = burst.apply(list(model.pending.values()), False, progress=self.draw_progress)
             except Exception as exc:
                 ok = False
                 print(exc)
@@ -958,19 +1174,35 @@ class Screen:
             ord("h"): "left",
             ord("l"): "right",
         }
+        prefix = ""
         while True:
             self.draw()
             key = self.scr.getch()
             model = self.model
+            if prefix:
+                chosen, prefix = prefix + (chr(key) if 0 < key < 256 else ""), ""
+                if chosen == "gg":
+                    self.jump(False)
+                elif chosen == "gt":
+                    self.switch_tab(self.tab + 1)
+                elif chosen == "gT":
+                    self.switch_tab(self.tab - 1)
+                continue
             if key in (ord("q"), ord("Q")):
                 if not model.pending or self.ask("Discard the pending changes and quit?"):
                     return
+            elif key == ord("g"):
+                prefix = "g"
+            elif key == ord("G"):
+                self.jump(True)
             elif key in arrows:
                 self.move(arrows[key])
             elif key == 9:
                 self.switch_tab(self.tab + 1)
             elif key == curses.KEY_BTAB:
                 self.switch_tab(self.tab - 1)
+            elif ord("1") <= key <= ord("4"):
+                self.switch_tab(key - ord("1"))
             elif key in (10, 13, curses.KEY_ENTER, ord(" ")):
                 self.activate()
             elif key in (ord("+"), ord("=")):
@@ -981,32 +1213,34 @@ class Screen:
                 self.adjust(1, True)
             elif key == ord("["):
                 self.adjust(-1, True)
-            elif key in (ord("r"), ord("g"), ord("b")):
-                self.channel("rgb".index(chr(key)), 1)
-            elif key in (ord("R"), ord("G"), ord("B")):
-                self.channel("RGB".index(chr(key)), -1)
             elif key == ord("s"):
                 self.make_active()
             elif key == ord("u"):
                 target = self.focus.key
-                if self.focus.key == "dpi-slider":
+                if target == "dpi-slider":
                     target = f"dpi.{model.dpi_sel + 1}"
                 model.undo(target)
             elif key == ord("x"):
                 model.undo_all()
             elif key == ord("a"):
                 self.apply()
+            elif key == ord(":"):
+                text = self.command_line()
+                model.msg = ""
+                if text is not None and not self.run_command(text):
+                    return
             elif key == 18:
                 self.reload()
             elif key == ord("!"):
                 self.accept()
             elif key == ord("?"):
-                self.overlay()
+                self.help_modal()
 
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     offline = "--offline" in argv
+    square = "--square" in argv or os.environ.get("AURORA_BORDERS") == "square"
     structure, drift = [], []
     if offline:
         base = image.load_sample()
@@ -1020,7 +1254,11 @@ def main(argv=None):
         structure = burst.validate_read(base, None)
         drift = [p for p in burst.validate_read(base, burst.load_last_good()) if p not in structure]
     model = Model(base, offline, structure, drift)
-    curses.wrapper(lambda scr: Screen(scr, model).run())
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        pass
+    curses.wrapper(lambda scr: Screen(scr, model, square).run())
     return 0
 
 

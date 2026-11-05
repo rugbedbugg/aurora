@@ -50,7 +50,11 @@ class FakeDevice:
         effect = image.get_led_effect(self.mem) or 0
         return bytes([7, 0, 0x62, 0x09, 0x10, 0x00, 0x23, (effect & 0x0F) << 4 | 0x0B])
 
-    def read_range(self, lo, hi):
+    def read_range(self, lo, hi, progress=None):
+        if progress is not None:
+            for done in range(8, hi - lo, 8):
+                progress(done, hi - lo)
+            progress(hi - lo, hi - lo)
         return bytes(self.mem[a] for a in range(lo, hi))
 
     def close(self):

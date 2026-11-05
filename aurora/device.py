@@ -117,17 +117,22 @@ class Device:
     def end_op(self):
         self.set_report([REPORT_ID, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
 
-    def read_range(self, lo, hi):
-        """Read a range one page at a time and close each page like the vendor app."""
+    def read_range(self, lo, hi, progress=None):
+        """Read a range one page at a time and close each page like the vendor app.
+
+        Call progress(done, total) after each page when it is given.
+        """
         if self.stale:
             self.primer = self.read_range_raw(0, 8)
             self.stale = False
-        return self.read_range_raw(lo, hi)
+        return self.read_range_raw(lo, hi, progress)
 
-    def read_range_raw(self, lo, hi):
+    def read_range_raw(self, lo, hi, progress=None):
         out = bytearray()
         for base in range(lo & ~7, hi, 8):
             for addr in range(max(base, lo), min(base + 8, hi)):
                 out.append(self.read(addr))
             self.end_op()
+            if progress is not None:
+                progress(len(out), hi - lo)
         return bytes(out)

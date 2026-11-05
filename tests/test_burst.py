@@ -74,6 +74,19 @@ def test_apply_writes_one_burst_and_verifies_it(state, monkeypatch):
     assert burst.load_last_good() == mem
 
 
+def test_apply_reports_progress_from_reading_through_verifying(state, monkeypatch):
+    mem = full_image()
+    install_fake(monkeypatch, mem)
+    seen = []
+    assert burst.apply([patch_polling(1000)], progress=lambda label, frac: seen.append((label, frac)))
+    labels = list(dict.fromkeys(label for label, _ in seen))
+    assert labels == ["Reading", "Writing", "Verifying"]
+    fractions = [frac for _, frac in seen]
+    assert fractions == sorted(fractions)
+    assert 0 <= fractions[0] < 0.1
+    assert fractions[-1] == pytest.approx(1.0)
+
+
 def test_apply_sends_nothing_when_nothing_changes(state, monkeypatch, capsys):
     mem = full_image()
     opened = install_fake(monkeypatch, mem)
