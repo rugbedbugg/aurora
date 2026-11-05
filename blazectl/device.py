@@ -69,7 +69,8 @@ class Device:
         self.node = find_node()
         if not os.access(self.node, os.R_OK | os.W_OK):
             raise DeviceError(
-                f"no access to {self.node}, install the udev rule or run: setfacl -m u:$USER:rw {self.node}"
+                f"no access to {self.node}, install the udev rule or run: "
+                f"sudo setfacl -m u:$USER:rw {self.node}"
             )
         self.fd = os.open(self.node, os.O_RDWR)
         # The first read of a session and the first read after a write burst are stale.
